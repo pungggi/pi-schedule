@@ -1,0 +1,57 @@
+{
+  "name": "pi-schedule",
+  "version": "0.1.0",
+  "description": "Recurring scheduled tasks for pi agents — security reviews, version checks, status polls, and more",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "schedule",
+    "cron",
+    "recurring",
+    "tasks"
+  ],
+  "type": "module",
+  "files": [
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "author": "alessandro@pungitore.ch",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pungggi/pi-schedule.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pungggi/pi-schedule/issues"
+  },
+  "homepage": "https://github.com/pungggi/pi-schedule#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@types/node": "^22.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.1.0"
+  }
+}
