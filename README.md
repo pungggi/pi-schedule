@@ -194,6 +194,17 @@ npm test
 npm run typecheck
 ```
 
+## Publishing
+
+Releases are CI-driven: push a `v*.*.*` tag and GitHub Actions publishes to
+npm with provenance. One-time setup (npm token + `NPM_TOKEN` secret) and the
+per-release flow are documented in **[docs/PUBLISHING.md](docs/PUBLISHING.md)**.
+
+```bash
+npm version patch -m "release: %s"   # bumps package.json + tags
+git push origin master --follow-tags   # triggers release.yml
+```
+
 ## License
 
 MIT
