@@ -5,3 +5,6 @@ coverage/
 *.log
 *.stackdump
 .DS_Store
+
+# manual smoke scripts (not shipped)
+/scripts/
