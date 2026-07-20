@@ -52,8 +52,15 @@ export function graceMsFor(
   tickMs: number = DEFAULT_TICK_MS,
 ): number {
   const tickFloor = tickMs * 2;
-  if (job.schedule.type === "interval") {
-    const pct = Math.floor(job.schedule.everyMs * 0.25);
+  // interval and once both use a relative period for grace.
+  const period =
+    job.schedule.type === "interval"
+      ? job.schedule.everyMs
+      : job.schedule.type === "once"
+        ? job.schedule.delayMs
+        : null;
+  if (period !== null) {
+    const pct = Math.floor(period * 0.25);
     return Math.min(Math.max(tickFloor, pct), 15 * 60_000);
   }
   return Math.max(tickFloor, 60 * 60_000);
@@ -144,5 +151,10 @@ export class CreateRateLimiter {
     if (this.timestamps.length >= this.maxPerMinute) return false;
     this.timestamps.push(nowMs);
     return true;
+  }
+
+  /** Test hook: clear the rolling window. */
+  reset(): void {
+    this.timestamps = [];
   }
 }

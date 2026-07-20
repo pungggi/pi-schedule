@@ -4,15 +4,30 @@
  * Supported forms:
  *   every 30m | every 2h | every 1d | 30m | 2h | 1d
  *   daily at 09:00 | daily 09:00 | at 09:00
+ *   in 10m | once 10m | in 30s   (one-shot, then terminate)
  */
 
-import type { DailySchedule, IntervalSchedule, ScheduleSpec } from "./types.js";
+import type {
+  DailySchedule,
+  IntervalSchedule,
+  OnceSchedule,
+  ScheduleSpec,
+} from "./types.js";
 
 const MS = {
   m: 60_000,
   h: 3_600_000,
   d: 86_400_000,
 } as const;
+
+const MS_ONCE = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+} as const;
+
+const MAX_ONCE_MS = 90 * 86_400_000;
 
 export class ScheduleParseError extends Error {
   constructor(message: string) {
@@ -34,34 +49,43 @@ export function parseSchedule(input: string): ScheduleSpec {
   const daily = tryParseDaily(raw);
   if (daily) return daily;
 
+  const once = tryParseOnce(raw);
+  if (once) return once;
+
   const interval = tryParseInterval(raw);
   if (interval) return interval;
 
   throw new ScheduleParseError(
-    `Unrecognized schedule "${input}". Use e.g. "every 30m", "every 2h", "every 1d", or "daily at 09:00".`,
+    `Unrecognized schedule "${input}". Use e.g. "every 30m", "every 2h", "every 1d", "daily at 09:00", or "in 10m".`,
   );
 }
 
 /**
- * Build a ScheduleSpec from separate tool params (every XOR dailyAt).
+ * Build a ScheduleSpec from separate tool params (every XOR dailyAt XOR once).
  */
 export function scheduleFromParts(parts: {
   every?: string;
   dailyAt?: string;
+  once?: string;
 }): ScheduleSpec {
   const hasEvery = Boolean(parts.every?.trim());
   const hasDaily = Boolean(parts.dailyAt?.trim());
+  const hasOnce = Boolean(parts.once?.trim());
+  const count = [hasEvery, hasDaily, hasOnce].filter(Boolean).length;
 
-  if (hasEvery === hasDaily) {
+  if (count !== 1) {
     throw new ScheduleParseError(
-      'Provide exactly one of "every" (e.g. "30m") or "dailyAt" (e.g. "09:00").',
+      'Provide exactly one of "every" (e.g. "30m"), "dailyAt" (e.g. "09:00"), or "once" (e.g. "10m").',
     );
   }
 
   if (hasEvery) {
     return parseSchedule(`every ${parts.every!.trim()}`);
   }
-  return parseSchedule(`daily at ${parts.dailyAt!.trim()}`);
+  if (hasDaily) {
+    return parseSchedule(`daily at ${parts.dailyAt!.trim()}`);
+  }
+  return parseSchedule(`in ${parts.once!.trim()}`);
 }
 
 function tryParseDaily(raw: string): DailySchedule | null {
@@ -107,6 +131,25 @@ function tryParseInterval(raw: string): IntervalSchedule | null {
   return { type: "interval", everyMs, every: `${n}${unit}` };
 }
 
+function tryParseOnce(raw: string): OnceSchedule | null {
+  // in 10m | once 10m | in 30s | 10m (when routed via scheduleFromParts)
+  const m = raw.match(/^(?:in|once)\s+(\d+)\s*([smhd])$/);
+  if (!m) return null;
+
+  const n = Number(m[1]);
+  const unit = m[2] as keyof typeof MS_ONCE;
+  if (!Number.isInteger(n) || n < 1) {
+    throw new ScheduleParseError(`Once delay must be a positive integer: "${raw}"`);
+  }
+
+  const delayMs = n * MS_ONCE[unit];
+  if (delayMs > MAX_ONCE_MS) {
+    throw new ScheduleParseError("Maximum once delay is 90d");
+  }
+
+  return { type: "once", delayMs, delay: `${n}${unit}` };
+}
+
 /**
  * Compute the next run time strictly after `from` (or at/after `from` when
  * `inclusive` is true — used for first scheduling of a brand-new job).
@@ -124,6 +167,11 @@ export function computeNextRunAt(
   if (schedule.type === "interval") {
     if (inclusive) return new Date(from.getTime());
     return new Date(from.getTime() + schedule.everyMs);
+  }
+
+  if (schedule.type === "once") {
+    if (inclusive) return new Date(from.getTime());
+    return new Date(from.getTime() + schedule.delayMs);
   }
 
   return nextDailyOccurrence(schedule, from, inclusive);
@@ -177,6 +225,7 @@ export function isDue(nextRunAt: string, now: Date = new Date()): boolean {
 /** Human-readable schedule summary. */
 export function formatSchedule(schedule: ScheduleSpec): string {
   if (schedule.type === "interval") return `every ${schedule.every}`;
+  if (schedule.type === "once") return `once in ${schedule.delay}`;
   return `daily at ${schedule.at}`;
 }
 

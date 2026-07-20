@@ -1,5 +1,7 @@
 node_modules/
 dist/
+coverage/
 .pi/
 *.log
+*.stackdump
 .DS_Store

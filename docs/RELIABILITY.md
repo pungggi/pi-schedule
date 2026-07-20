@@ -19,8 +19,11 @@ and durable-execution practice.
 | Missed window? | `missedWindow` policy | no |
 | Single-flight? | lock manager | no |
 | Already delivered this slot? | ledger idempotency key | no |
-| What to do? | job `prompt` + agent | yes |
-| Privilege expectation | prompt contract + `tool_call` block | yes (structural for built-ins) |
+| What kind of fire? | job `action` (`prompt`/`shell`/`notify`/`message`) | no |
+| What to do? | job `prompt` + agent (prompt / shell-wake) | yes when agent wakes |
+| Shell command run | `pi.exec` in runner | no |
+| Shell wake decision | `wakeOn` + exit code | no |
+| Privilege expectation | prompt contract + `tool_call` block | yes (structural; only if agent woke) |
 
 ## Pitfalls → mitigations
 
@@ -116,16 +119,18 @@ errors into fluent false digests; ~70% of silent failures found by humans.
   "status": "delivered|error|skipped|locked|busy",
   "startedAt": "…",
   "endedAt": "…",
-  "detail": "optional reason",
+  "detail": "optional reason / shell exit summary",
   "tier": "read_only",
-  "missedWindow": "catch_up_one"
+  "missedWindow": "catch_up_one",
+  "action": "prompt|shell|notify|message"
 }
 ```
 
 Query via tool: `schedule action=history [id=…] [limit=10]`.
 
-**Honest limitation:** `delivered` means the prompt was injected successfully,
-not that the agent completed the task correctly. Outcome verification is future work.
+**Honest limitation:** `delivered` means the action ran (prompt injected, shell
+finished, notify/message shown) — not that the agent completed a task correctly.
+Shell exit codes are recorded in `detail` / `lastShell`; agent outcome verification is future work.
 
 ### 7. Privilege / blast radius / self-persistence
 
@@ -140,14 +145,31 @@ is later replayed as a user message — a **stored-instruction persistence vecto
 | `suggest` | drafts OK | blocks `bash` |
 | `mutate` | changes allowed | none |
 
-**Not yet:** interactive confirm gate on `tier=mutate` create; custom tools not in the block list.
+Privilege enters **only when an agent turn starts** (prompt jobs, or shell jobs
+that wake). `notify` / `message` / quiet shell runs do not push the stack.
+
+**Shell jobs** always store `tier=mutate`. The command itself runs via
+`pi.exec` (outside the agent tool path) — that is intentional for CI polls,
+but it is a real local-execution surface. Prefer narrow commands and
+`wakeOn=failure` so the agent only wakes with context when needed.
+
+**Schedule-tool escalation guard:** the `schedule` tool itself is in the
+privilege block list. A `read_only` or `suggest` fired turn **cannot** call
+`schedule` with `create`/`cancel`/`enable`/`disable`/`run_now` — those persist
+state (and `create` of `kind=shell` would be a read_only → mutate-shell
+escalation). `list`/`history` stay allowed. To let a scheduled job manage
+other schedules, create it as `tier=mutate`.
+
+**Not yet:** interactive confirm gate on `tier=mutate` / shell create; custom tools not in the block list; command allowlists.
 
 ### 8. Self-spam / runaway scheduling
 
 **Mitigation:**
 - Max **50** jobs per scope file (global or one project)
 - Create rate limit **10/min** (in-process)
-- Min interval **1m** (parser)
+- Min interval **1m** (parser); `once` allows seconds up to **90d**
+- **`maxRuns`** caps deliveries per job (counts ok + error); the job then auto-disables (`terminated: maxRuns`) instead of firing forever
+- **`once`** jobs fire exactly once then terminate — no runaway one-shots
 - Prompt contract discourages schedule thrash
 
 ### 9. Seams / long-latency silent bugs

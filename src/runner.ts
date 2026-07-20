@@ -5,10 +5,24 @@
  *  1. session_start (startup/new/resume) when jobs are due AND no CLI initial prompt
  *  2. an in-session ticker, only while idle
  *
+ * Action kinds (see action.ts):
+ *  - prompt: inject isolated agent task (original behavior)
+ *  - shell: pi.exec command; optional agent wake via wakeOn
+ *  - notify: UI/console reminder only
+ *  - message: session custom message (display, no agent turn)
+ *
  * Mitigations (see docs/RELIABILITY.md).
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULT_JOB_ACTION,
+  DEFAULT_SHELL_TIMEOUT_MS,
+  selectShellFollowUp,
+  shouldWakeForShell,
+  terminalReason,
+  truncateOutput,
+} from "./action.js";
 import { shouldSkipDueOnSessionStart } from "./cli-prompt.js";
 import { RunLedger, buildRun, newRunId } from "./ledger.js";
 import { JobLockManager } from "./lock.js";
@@ -20,9 +34,18 @@ import {
   idempotencyKeyFor,
 } from "./policy.js";
 import { PrivilegeGuard } from "./privilege.js";
-import { buildFirePrompt } from "./prompt.js";
+import {
+  buildFirePrompt,
+  buildShellFollowUpPrompt,
+  notifyLabel,
+} from "./prompt.js";
 import { StoreError, type ScheduleStore } from "./store.js";
-import type { FireSource, ScheduledJob } from "./types.js";
+import type {
+  FireSource,
+  JobAction,
+  ScheduledJob,
+  ShellRunResult,
+} from "./types.js";
 
 /** How often the in-session ticker checks for due jobs. */
 export const TICK_MS = 30_000;
@@ -208,6 +231,149 @@ export class ScheduleRunner {
     this.ledger.append(buildRun(args));
   }
 
+  private sendAgentMessage(
+    body: string,
+    ctx: ExtensionContext,
+    deliverAs?: "followUp" | "steer",
+  ): void {
+    if (deliverAs || !ctx.isIdle()) {
+      this.opts.pi.sendUserMessage(body, {
+        deliverAs: deliverAs ?? "followUp",
+      });
+    } else {
+      this.opts.pi.sendUserMessage(body);
+    }
+  }
+
+  private async deliver(
+    ctx: ExtensionContext,
+    job: ScheduledJob,
+    opts: {
+      runId: string;
+      source: FireSource;
+      forced: boolean;
+      deliverAs?: "followUp" | "steer";
+    },
+  ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
+    const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
+
+    if (action === "notify") {
+      const msg = notifyLabel(job);
+      if (ctx.hasUI) ctx.ui.notify(msg, "info");
+      else console.log(msg);
+      this.opts.pi.sendMessage?.(
+        {
+          customType: "pi-schedule",
+          content: msg,
+          display: true,
+          details: { jobId: job.id, action: "notify", runId: opts.runId },
+        },
+        { triggerTurn: false },
+      );
+      return { detail: "notify", wokeAgent: false };
+    }
+
+    if (action === "message") {
+      const body = job.prompt.trim() || job.name;
+      this.opts.pi.sendMessage(
+        {
+          customType: "pi-schedule",
+          content: body,
+          display: true,
+          details: { jobId: job.id, action: "message", runId: opts.runId },
+        },
+        { triggerTurn: false },
+      );
+      return { detail: "message", wokeAgent: false };
+    }
+
+    if (action === "shell") {
+      return this.deliverShell(ctx, job, opts);
+    }
+
+    // prompt (default)
+    const body = buildFirePrompt({
+      job,
+      runId: opts.runId,
+      source: opts.source,
+      forced: opts.forced,
+    });
+    this.sendAgentMessage(body, ctx, opts.deliverAs);
+    return { detail: "prompt", wokeAgent: true };
+  }
+
+  private async deliverShell(
+    ctx: ExtensionContext,
+    job: ScheduledJob,
+    opts: {
+      runId: string;
+      source: FireSource;
+      forced: boolean;
+      deliverAs?: "followUp" | "steer";
+    },
+  ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
+    const command = job.command?.trim();
+    if (!command) {
+      throw new Error(`shell job "${job.name}" has no command`);
+    }
+
+    const cwd = job.projectPath ?? ctx.cwd ?? this.cwd;
+    const timeoutMs = job.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
+
+    if (ctx.hasUI) {
+      ctx.ui.notify(
+        `[pi-schedule] running shell "${job.name}": ${command}`,
+        "info",
+      );
+    }
+
+    const execResult = await this.opts.pi.exec("bash", ["-lc", command], {
+      cwd,
+      timeout: timeoutMs,
+    });
+
+    const lastShell: ShellRunResult = {
+      ok: execResult.code === 0 && execResult.killed !== true,
+      command,
+      cwd,
+      timeoutMs,
+      code: execResult.code,
+      killed: Boolean(execResult.killed),
+      stdout: truncateOutput(execResult.stdout),
+      stderr: truncateOutput(execResult.stderr),
+    };
+
+    this.opts.pi.sendMessage?.(
+      {
+        customType: "pi-schedule",
+        content: `Shell "${job.name}" exit ${lastShell.code}${lastShell.killed ? " (killed)" : ""}: ${command}`,
+        display: true,
+        details: { jobId: job.id, action: "shell", runId: opts.runId, result: lastShell },
+      },
+      { triggerTurn: false },
+    );
+
+    let wokeAgent = false;
+    if (shouldWakeForShell(job, lastShell)) {
+      const instruction = selectShellFollowUp(job, lastShell);
+      if (instruction) {
+        const body = buildShellFollowUpPrompt({
+          job,
+          runId: opts.runId,
+          source: opts.source,
+          forced: opts.forced,
+          result: lastShell,
+          instruction,
+        });
+        this.sendAgentMessage(body, ctx, opts.deliverAs);
+        wokeAgent = true;
+      }
+    }
+
+    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}`;
+    return { detail, wokeAgent, lastShell };
+  }
+
   private async processOne(
     ctx: ExtensionContext,
     job: ScheduledJob,
@@ -227,6 +393,7 @@ export class ScheduleRunner {
 
     const tier = job.tier ?? DEFAULT_TIER;
     const missedWindow = job.missedWindow ?? DEFAULT_MISSED_WINDOW;
+    const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
 
     // Pre-lock idempotency (cheap).
     if (!opts.forced && this.alreadyDelivered(job, key)) {
@@ -248,6 +415,7 @@ export class ScheduleRunner {
         detail: "idempotent_replay",
         tier,
         missedWindow,
+        action,
       });
       return advanced;
     }
@@ -273,6 +441,7 @@ export class ScheduleRunner {
           detail: decision.reason,
           tier,
           missedWindow,
+          action,
         });
         return advanced;
       }
@@ -293,6 +462,7 @@ export class ScheduleRunner {
       // Re-check after lock (check-then-act fix).
       const fresh = this.opts.store.get(job.id, this.cwd) ?? job;
       const freshKey = opts.forced ? key : idempotencyKeyFor(fresh);
+      const freshAction: JobAction = fresh.action ?? DEFAULT_JOB_ACTION;
       if (!opts.forced && this.alreadyDelivered(fresh, freshKey)) {
         const advanced = this.opts.store.markAttempt(fresh, at, "skipped", {
           error: "idempotent_replay_post_lock",
@@ -312,33 +482,33 @@ export class ScheduleRunner {
           detail: "idempotent_replay_post_lock",
           tier: fresh.tier ?? tier,
           missedWindow: fresh.missedWindow ?? missedWindow,
+          action: freshAction,
         });
         return advanced;
       }
 
-      const body = buildFirePrompt({
-        job: fresh,
+      const delivery = await this.deliver(ctx, fresh, {
         runId,
         source: opts.source,
         forced: opts.forced,
+        deliverAs: opts.deliverAs,
       });
 
-      if (opts.deliverAs || !ctx.isIdle()) {
-        this.opts.pi.sendUserMessage(body, {
-          deliverAs: opts.deliverAs ?? "followUp",
-        });
-      } else {
-        this.opts.pi.sendUserMessage(body);
+      // Structural tier enforcement only when an agent turn was started.
+      if (delivery.wokeAgent) {
+        this.privilege.enter(fresh.tier ?? tier);
       }
-
-      // Structural tier enforcement for the upcoming agent turn.
-      this.privilege.enter(fresh.tier ?? tier);
 
       // Advance store FIRST (durable). Ledger is best-effort and must not
       // prevent nextRunAt advancement if runs.jsonl is unwritable.
       const updated = this.opts.store.markAttempt(fresh, at, "ok", {
         idempotencyKey: opts.forced ? key : freshKey,
+        lastShell: delivery.lastShell,
       });
+      const term = terminalReason(updated, updated.runCount);
+      const finalJob = term
+        ? this.opts.store.terminate(updated, term, at)
+        : updated;
       this.recordBestEffort({
         runId,
         jobId: fresh.id,
@@ -350,10 +520,13 @@ export class ScheduleRunner {
         status: "delivered",
         startedAt,
         endedAt: this.now().toISOString(),
+        detail:
+          delivery.detail + (term ? ` terminated:${term}` : ""),
         tier: fresh.tier ?? tier,
         missedWindow: fresh.missedWindow ?? missedWindow,
+        action: freshAction,
       });
-      return updated;
+      return finalJob;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (ctx.hasUI) {
@@ -369,6 +542,10 @@ export class ScheduleRunner {
         error: message,
         idempotencyKey: key,
       });
+      const term = terminalReason(updated, updated.runCount);
+      const finalJob = term
+        ? this.opts.store.terminate(updated, term, at)
+        : updated;
       this.recordBestEffort({
         runId,
         jobId: job.id,
@@ -380,11 +557,12 @@ export class ScheduleRunner {
         status: "error",
         startedAt,
         endedAt: this.now().toISOString(),
-        detail: message,
+        detail: message + (term ? ` terminated:${term}` : ""),
         tier,
         missedWindow,
+        action,
       });
-      return updated;
+      return finalJob;
     } finally {
       handle.release();
     }

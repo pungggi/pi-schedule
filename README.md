@@ -26,6 +26,7 @@ pi -e ./src/extension.ts
 | Piece | Behavior |
 |-------|----------|
 | **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history |
+| **Kinds** | `prompt` (default) · `shell` · `notify` · `message` — what fires when due |
 | **Storage** | Hybrid: global `~/.pi-schedule/schedules.json` + project `.pi/schedule.json` |
 | **Syntax** | Intervals (`30m`, `2h`, `1d`) and daily wall-clock (`09:00`) |
 | **Fire** | On session start when due; also while the session stays open (30s ticker) |
@@ -34,34 +35,91 @@ pi -e ./src/extension.ts
 
 Storage is **daemon-ready**: each job tracks `nextRunAt` / `lastRunAt` so a future headless runner can share the same files.
 
+## Agent skill
+
+The package ships a **`schedule` skill** (`skills/schedule/SKILL.md`) that
+loads on-demand and teaches the agent *how to schedule well*: when to use
+`kind` (prompt / shell / notify / message), `every` vs `dailyAt`, privilege
+tier, shell `wakeOn`, the missed-window tradeoff, and self-contained prompts.
+The tool is self-describing for mechanics; the skill owns the patterns.
+
 ## Agent tool
 
 ```text
 schedule
   action: create | list | cancel | enable | disable | run_now | history
   name?:          short label (create)
-  prompt?:        full task text injected when due (create)
-  every?:         "30m" | "2h" | "1d"   (xor dailyAt)
-  dailyAt?:       "09:00"               (xor every)
+  kind?:          prompt | shell | notify | message   (default prompt)
+  prompt?:        task / reminder text; shell follow-up instruction
+  command?:       shell only — run via bash -lc
+  wakeOn?:        shell only — always | failure | success | never
+  successPrompt?: shell only — agent text on exit 0
+  failurePrompt?: shell only — agent text on non-zero / killed
+  timeoutMs?:     shell only — default 60000, max 600000
+  once?:          one-shot relative delay ("10m" / "30s"), then terminate (xor every/dailyAt)
+  maxRuns?:       max deliveries (ok+error) before auto-disable
+  every?:         "30m" | "2h" | "1d"   (xor dailyAt/once)
+  dailyAt?:       "09:00"               (xor every/once)
   scope?:         "global" | "project"  (default: project if .pi exists)
   missedWindow?:  "catch_up_one" | "skip"   (default catch_up_one)
-  tier?:          "read_only" | "suggest" | "mutate"  (default read_only)
+  tier?:          "read_only" | "suggest" | "mutate"  (default read_only; shell→mutate)
   id?:            job id
   limit?:         history row count
 ```
 
+### Job kinds
+
+| kind | What happens | Agent turn? |
+|------|----------------|-------------|
+| **prompt** (default) | Inject isolated task contract | yes |
+| **shell** | `pi.exec("bash", ["-lc", command])`; optional wake via `wakeOn` | only if wake fires |
+| **notify** | UI/console reminder | no |
+| **message** | Session custom message (display only) | no |
+
+Shell jobs always store `tier=mutate` (command runs outside the agent tool path). Prefer `wakeOn=failure` for CI polls so success is silent.
+
+### Lifecycle: `once` and `maxRuns`
+
+- **`once`** — fire one time after a relative delay (`once="10m"`, `once="30s"`), then auto-disable. Ideal for reminders and delayed follow-ups. `run_now` won't re-fire a terminated one-shot — recreate it.
+- **`maxRuns`** — cap a recurring job to N deliveries (counts ok + error; skips/locks don't count). After the cap, the job auto-disables with `terminated: maxRuns`. Re-enabling clears the flag and resumes counting.
+
+A terminated job is disabled and excluded from due scans. `list` shows `[off/terminated:once]` or `[…:maxRuns]`.
+
 ### Examples
 
 ```text
-# Daily security review at 09:00, project-scoped, read-only
+# Daily STATIC security review at 09:00, project-scoped, read-only.
+# (Static = read/search only. A git-driven "recent changes" review would need
+#  bash, which read_only blocks — use tier="mutate" for that.)
 schedule action=create name="security-review"
-  prompt="Review recent changes for security issues. Summarize findings."
+  prompt="Review the code under src/ for security issues (injection, auth bypass, exposed secrets). Summarize findings with file:line. If none, say 'No findings'."
   dailyAt="09:00" scope="project" tier="read_only"
 
-# Check package versions every day; skip if the session opens long after due
+# Direct shell poll — no agent turn on green; wake only on failure.
+schedule action=create name="ci-poll" kind="shell"
+  command="gh run list --limit 1 --json conclusion -q '.[0].conclusion'"
+  wakeOn="failure"
+  failurePrompt="Latest CI run failed. Inspect logs and propose or apply fixes."
+  every="5m" missedWindow="skip"
+
+# Human reminder (no model tokens).
+schedule action=create name="stretch" kind="notify"
+  prompt="Stand up and stretch." every="1h"
+
+# One-shot reminder in 5 minutes, then done.
+schedule action=create name="break" kind="notify"
+  prompt="Eye break — look 20ft away for 20s." once="5m"
+
+# Bounded CI poll — stop after 10 checks even if still failing.
+schedule action=create name="deploy-watch" kind="shell"
+  command="gh run list --limit 1 --json conclusion -q '.[0].conclusion'"
+  wakeOn="failure" failurePrompt="Deploy failed — investigate."
+  every="5m" maxRuns=10 missedWindow="skip"
+
+# Check package versions every day via an agent prompt that must use the shell.
 schedule action=create name="pkg-versions"
-  prompt="Check npm outdated / new package versions. Report only meaningful updates."
-  every="1d" missedWindow="skip"
+  prompt="Run `npm outdated` for prod dependencies. Report only meaningful updates as current→latest with a one-line rationale. If nothing meaningful, reply 'No findings'."
+  every="1d" tier="mutate" missedWindow="skip"
 
 # List / history / force / cancel
 schedule action=list
@@ -121,10 +179,12 @@ Summary of MVP mitigations:
 
 ## MVP scope
 
-- tools-only (no `/schedule` command yet)
-- no cron expressions
+- tool + skill (a `schedule` skill ships in `skills/`, teaching kind/tier/scope/missed-window choices and self-contained prompt writing); no dedicated `/schedule` slash command yet
+- action kinds: prompt / shell / notify / message (shell via `bash -lc`, optional `wakeOn`)
+- lifecycle: `once` one-shots + `maxRuns` bounded polling
+- no cron expressions yet
 - no background OS daemon (in-session only; storage is ready)
-- `delivered` = prompt injected, not “agent finished correctly”
+- `delivered` = action executed (prompt injected / shell finished / notify shown), not “agent finished correctly”
 
 ## Dev
 

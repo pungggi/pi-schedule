@@ -107,6 +107,7 @@ export function buildRun(partial: {
   detail?: string;
   tier: JobRun["tier"];
   missedWindow: JobRun["missedWindow"];
+  action?: JobRun["action"];
 }): JobRun {
   return {
     runId: partial.runId ?? newRunId(),
@@ -122,5 +123,6 @@ export function buildRun(partial: {
     detail: partial.detail,
     tier: partial.tier,
     missedWindow: partial.missedWindow,
+    action: partial.action,
   };
 }

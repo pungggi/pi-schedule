@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { DEFAULT_JOB_ACTION, isWakeOn, normalizeJobAction } from "./action.js";
 import {
   DEFAULT_MISSED_WINDOW,
   DEFAULT_TIER,
@@ -33,6 +34,8 @@ import type {
   ScheduleScope,
   ScheduleStoreFile,
   ScheduledJob,
+  ShellRunResult,
+  TerminatedReason,
 } from "./types.js";
 
 const STORE_VERSION = 1 as const;
@@ -77,10 +80,35 @@ function emptyStore(): ScheduleStoreFile {
   return { version: STORE_VERSION, jobs: [] };
 }
 
-/** Normalize legacy rows missing reliability fields. */
+/** Normalize legacy rows missing reliability / action fields. */
 function normalizeJob(raw: ScheduledJob): ScheduledJob {
+  let action = DEFAULT_JOB_ACTION;
+  try {
+    action = normalizeJobAction(raw.action);
+  } catch {
+    action = DEFAULT_JOB_ACTION;
+  }
+  const wakeOn = raw.wakeOn !== undefined && isWakeOn(raw.wakeOn) ? raw.wakeOn : undefined;
+  const timeoutMs =
+    raw.timeoutMs !== undefined &&
+    Number.isFinite(raw.timeoutMs) &&
+    (raw.timeoutMs as number) > 0
+      ? raw.timeoutMs
+      : undefined;
+  const maxRuns =
+    raw.maxRuns !== undefined &&
+    Number.isInteger(raw.maxRuns) &&
+    (raw.maxRuns as number) > 0
+      ? raw.maxRuns
+      : undefined;
   return {
     ...raw,
+    action,
+    prompt: raw.prompt ?? "",
+    wakeOn,
+    timeoutMs,
+    maxRuns,
+    terminated: raw.terminated ?? null,
     missedWindow: raw.missedWindow ?? DEFAULT_MISSED_WINDOW,
     tier: raw.tier ?? DEFAULT_TIER,
   };
@@ -280,14 +308,23 @@ export class ScheduleStore {
       inclusive: input.schedule.type === "daily",
     }).toISOString();
 
+    const action = normalizeJobAction(input.action);
     const job: ScheduledJob = {
       id: newJobId(),
       name: input.name.trim(),
-      prompt: input.prompt.trim(),
+      prompt: (input.prompt ?? "").trim(),
+      action,
+      command: input.command?.trim() || undefined,
+      wakeOn: input.wakeOn,
+      successPrompt: input.successPrompt?.trim() || undefined,
+      failurePrompt: input.failurePrompt?.trim() || undefined,
+      timeoutMs: input.timeoutMs,
+      maxRuns: input.maxRuns,
       schedule: input.schedule,
       scope,
       projectPath: projectRoot,
       enabled: true,
+      terminated: null,
       missedWindow: input.missedWindow ?? DEFAULT_MISSED_WINDOW,
       tier: input.tier ?? DEFAULT_TIER,
       createdAt: isoNow,
@@ -336,7 +373,12 @@ export class ScheduleStore {
     job: ScheduledJob,
     at: Date,
     status: NonNullable<JobStatus>,
-    opts: { error?: string; idempotencyKey?: string; advance?: boolean } = {},
+    opts: {
+      error?: string;
+      idempotencyKey?: string;
+      advance?: boolean;
+      lastShell?: ShellRunResult;
+    } = {},
   ): ScheduledJob {
     const advance = opts.advance !== false;
     const next = advance
@@ -353,6 +395,7 @@ export class ScheduleStore {
       lastError: opts.error,
       lastIdempotencyKey: opts.idempotencyKey ?? job.lastIdempotencyKey,
       updatedAt: at.toISOString(),
+      ...(opts.lastShell ? { lastShell: opts.lastShell } : {}),
     };
     this.upsert(updated);
     return updated;
@@ -374,7 +417,29 @@ export class ScheduleStore {
     const updated: ScheduledJob = {
       ...job,
       enabled,
+      // Re-enabling clears the terminal flag so the job can run again;
+      // disabling preserves it for history.
+      terminated: enabled ? null : (job.terminated ?? null),
       updatedAt: new Date().toISOString(),
+    };
+    this.upsert(updated);
+    return updated;
+  }
+
+  /**
+   * Mark a job terminal (disabled + reason) after it exhausted its runs.
+   * Does not advance nextRunAt — the job is done.
+   */
+  terminate(
+    job: ScheduledJob,
+    reason: TerminatedReason,
+    at: Date = new Date(),
+  ): ScheduledJob {
+    const updated: ScheduledJob = {
+      ...normalizeJob(job),
+      enabled: false,
+      terminated: reason,
+      updatedAt: at.toISOString(),
     };
     this.upsert(updated);
     return updated;

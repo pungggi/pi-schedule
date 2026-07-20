@@ -1,7 +1,7 @@
 {
   "name": "pi-schedule",
-  "version": "0.1.0",
-  "description": "Recurring scheduled tasks for pi agents — security reviews, version checks, status polls, and more",
+  "version": "0.3.0",
+  "description": "Scheduled actions for pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -13,6 +13,7 @@
   "type": "module",
   "files": [
     "src",
+    "skills",
     "docs",
     "README.md",
     "LICENSE"
@@ -21,11 +22,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && vitest run"
+    "check": "tsc --noEmit && vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "pi": {
     "extensions": [
       "./src/extension.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "author": "alessandro@pungitore.ch",
@@ -52,6 +57,7 @@
     "@types/node": "^22.0.0",
     "typebox": "^1.0.0",
     "typescript": "^5.9.0",
-    "vitest": "^3.1.0"
+    "vitest": "^3.1.0",
+    "@vitest/coverage-v8": "^3.1.0"
   }
 }

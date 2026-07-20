@@ -2,11 +2,18 @@
  * Agent-facing `schedule` tool.
  *
  * Actions: create | list | cancel | enable | disable | run_now | history
+ * Job kinds (create.kind): prompt | shell | notify | message
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  ActionError,
+  normalizeCreateAction,
+  normalizeMaxRuns,
+  payloadSummary,
+} from "./action.js";
 import { RunLedger } from "./ledger.js";
 import {
   CreateRateLimiter,
@@ -40,10 +47,48 @@ const ScheduleParams = Type.Object({
     "history",
   ] as const),
   name: Type.Optional(Type.String({ description: "Job name (create)" })),
+  /**
+   * What fires when due (create). Default prompt.
+   * prompt = agent task | shell = run command | notify = UI reminder | message = session note
+   */
+  kind: Type.Optional(
+    StringEnum(["prompt", "shell", "notify", "message"] as const),
+  ),
+  /** One-shot: fire once after a relative delay (e.g. "10m", "30s"), then terminate. */
+  once: Type.Optional(
+    Type.String({ description: 'One-shot delay, e.g. "10m" or "30s" (xor with every/dailyAt)' }),
+  ),
+  /** Max deliveries (ok+error) before auto-disable. */
+  maxRuns: Type.Optional(
+    Type.Number({ description: "Max deliveries before the job auto-disables (default: unlimited)." }),
+  ),
   prompt: Type.Optional(
     Type.String({
       description:
-        "Task prompt injected as a user message when due (create). Be specific.",
+        "Task/reminder text (required for prompt/notify/message; optional shell follow-up).",
+    }),
+  ),
+  command: Type.Optional(
+    Type.String({
+      description: 'Shell command for kind=shell (e.g. "npm test").',
+    }),
+  ),
+  wakeOn: Type.Optional(
+    StringEnum(["always", "failure", "success", "never"] as const),
+  ),
+  successPrompt: Type.Optional(
+    Type.String({
+      description: "Shell only: agent follow-up when command succeeds.",
+    }),
+  ),
+  failurePrompt: Type.Optional(
+    Type.String({
+      description: "Shell only: agent follow-up when command fails.",
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Number({
+      description: "Shell only: exec timeout ms (default 60000, max 600000).",
     }),
   ),
   every: Type.Optional(
@@ -57,7 +102,7 @@ const ScheduleParams = Type.Object({
   missedWindow: Type.Optional(
     StringEnum(["catch_up_one", "skip"] as const),
   ),
-  /** Privilege tier for the fire prompt: read_only (default) | suggest | mutate */
+  /** Privilege tier for agent-waking fires: read_only (default) | suggest | mutate. Shell forces mutate. */
   tier: Type.Optional(
     StringEnum(["read_only", "suggest", "mutate"] as const),
   ),
@@ -68,16 +113,38 @@ const ScheduleParams = Type.Object({
 
 const createLimiter = new CreateRateLimiter();
 
+/** Test hook: reset the in-process create rate window between tests. */
+export function _resetCreateLimiterForTests(): void {
+  createLimiter.reset();
+}
+
 function summarize(job: ScheduledJob, now: Date = new Date()): string {
-  const state = job.enabled ? "on" : "off";
+  const state = job.terminated
+    ? `off/terminated:${job.terminated}`
+    : job.enabled
+      ? "on"
+      : "off";
   const next = formatRelative(job.nextRunAt, now);
   const last = job.lastRunAt ? formatRelative(job.lastRunAt, now) : "never";
+  const kind = job.action ?? "prompt";
+  const payload = truncate(payloadSummary(job), 120);
+  const wake =
+    kind === "shell" && job.wakeOn ? `  wakeOn: ${job.wakeOn}` : "";
+  const maxRuns =
+    job.maxRuns !== undefined
+      ? `  runs: ${job.runCount}/${job.maxRuns}`
+      : "";
+  // Surface the last shell outcome so a failing CI poll doesn't look "ok".
+  const shellInfo = job.lastShell
+    ? `  lastExit=${job.lastShell.code}${job.lastShell.killed ? " killed" : ""}${job.lastShell.ok ? "" : " (failed)"}`
+    : "";
   return [
-    `- ${job.id}  ${job.name}  [${state}/${job.scope}/${job.tier}]`,
-    `  schedule: ${formatSchedule(job.schedule)}  missedWindow: ${job.missedWindow}`,
-    `  next: ${next}  last: ${last}  runs: ${job.runCount}` +
-      (job.lastStatus ? `  lastStatus: ${job.lastStatus}` : ""),
-    `  prompt: ${truncate(job.prompt, 120)}`,
+    `- ${job.id}  ${job.name}  [${state}/${job.scope}/${kind}/${job.tier}]`,
+    `  schedule: ${formatSchedule(job.schedule)}  missedWindow: ${job.missedWindow}${wake}`,
+    `  next: ${next}  last: ${last}  runs: ${job.runCount}${maxRuns}` +
+      (job.lastStatus ? `  lastStatus: ${job.lastStatus}` : "") +
+      shellInfo,
+    `  ${kind === "shell" ? "command" : "prompt"}: ${payload}`,
   ].join("\n");
 }
 
@@ -105,10 +172,11 @@ export function registerScheduleTool(
     name: "schedule",
     label: "Schedule",
     description:
-      "Manage recurring agent tasks (security review, version checks, status polls). " +
+      "Manage scheduled agent tasks and actions (reviews, polls, shell checks, reminders). " +
       "Actions: create, list, cancel, enable, disable, run_now, history. " +
+      "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
-      "Defaults: tier=read_only, missedWindow=catch_up_one. " +
+      "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on session start (unless pi was launched with an initial prompt) " +
       "and while the session is open. See package docs/RELIABILITY.md.",
     parameters: ScheduleParams,
@@ -138,7 +206,11 @@ export function registerScheduleTool(
             });
         }
       } catch (err) {
-        if (err instanceof ScheduleParseError || err instanceof StoreError) {
+        if (
+          err instanceof ScheduleParseError ||
+          err instanceof StoreError ||
+          err instanceof ActionError
+        ) {
           return textResult(`Error: ${err.message}`, { error: err.message });
         }
         const message = err instanceof Error ? err.message : String(err);
@@ -152,7 +224,15 @@ function handleCreate(
   store: ScheduleStore,
   params: {
     name?: string;
+    kind?: string;
     prompt?: string;
+    command?: string;
+    wakeOn?: string;
+    successPrompt?: string;
+    failurePrompt?: string;
+    timeoutMs?: number;
+    once?: string;
+    maxRuns?: number;
     every?: string;
     dailyAt?: string;
     scope?: ScheduleScope;
@@ -172,23 +252,39 @@ function handleCreate(
       error: "name_required",
     });
   }
-  if (!params.prompt?.trim()) {
-    return textResult('Error: "prompt" is required for create', {
-      error: "prompt_required",
-    });
-  }
+
+  const normalized = normalizeCreateAction({
+    kind: params.kind,
+    prompt: params.prompt,
+    command: params.command,
+    wakeOn: params.wakeOn,
+    successPrompt: params.successPrompt,
+    failurePrompt: params.failurePrompt,
+    timeoutMs: params.timeoutMs,
+  });
 
   const schedule = scheduleFromParts({
     every: params.every,
     dailyAt: params.dailyAt,
+    once: params.once,
   });
   const scope: ScheduleScope = params.scope ?? defaultScope(cwd);
   const missedWindow = params.missedWindow ?? DEFAULT_MISSED_WINDOW;
-  const tier = params.tier ?? DEFAULT_TIER;
+  const tier: PrivilegeTier = normalized.forceTierMutate
+    ? "mutate"
+    : (params.tier ?? DEFAULT_TIER);
+  const maxRuns = normalizeMaxRuns(params.maxRuns);
 
   const job = store.create({
     name: params.name,
-    prompt: params.prompt,
+    prompt: normalized.prompt,
+    action: normalized.action,
+    command: normalized.command,
+    wakeOn: normalized.wakeOn,
+    successPrompt: normalized.successPrompt,
+    failurePrompt: normalized.failurePrompt,
+    timeoutMs: normalized.timeoutMs,
+    maxRuns,
     schedule,
     scope,
     projectPath: scope === "project" ? cwd : undefined,
@@ -196,10 +292,15 @@ function handleCreate(
     tier,
   });
 
+  const shellBits =
+    job.action === "shell"
+      ? `  command=${JSON.stringify(job.command)}  wakeOn=${job.wakeOn}`
+      : "";
+
   return textResult(
     [
       `Created job ${job.id} "${job.name}" (${formatSchedule(job.schedule)}, ${job.scope}).`,
-      `tier=${job.tier}  missedWindow=${job.missedWindow}`,
+      `kind=${job.action}  tier=${job.tier}  missedWindow=${job.missedWindow}${shellBits}`,
       `Next run: ${formatRelative(job.nextRunAt)}.`,
       `Use schedule action=run_now id=${job.id} to fire immediately.`,
     ].join("\n"),
@@ -211,7 +312,7 @@ function handleList(store: ScheduleStore, cwd: string) {
   const jobs = store.listForCwd(cwd);
   if (jobs.length === 0) {
     return textResult(
-      "No scheduled jobs. Create one with action=create, name, prompt, and every or dailyAt.",
+      "No scheduled jobs. Create one with action=create, name, kind (optional), prompt or command, and every or dailyAt.",
       { jobs: [] },
     );
   }
@@ -272,6 +373,12 @@ async function handleRunNow(
   if (!job) {
     return textResult(`Job ${id} not found.`, { error: "not_found" });
   }
+  if (job.terminated) {
+    return textResult(
+      `Job ${job.id} "${job.name}" is terminated (${job.terminated}). Cancel and recreate to run again.`,
+      { error: "terminated", job },
+    );
+  }
 
   const results = await runner.fireDue(ctx, {
     source: "run_now",
@@ -289,11 +396,15 @@ async function handleRunNow(
     );
   }
 
+  const kind = updated.action ?? "prompt";
   switch (updated.lastStatus) {
     case "ok":
       return textResult(
-        `Delivered job ${updated.id} "${updated.name}". Isolated prompt injected ` +
-          `(tier=${updated.tier}). Check schedule action=history id=${updated.id}.`,
+        `Delivered job ${updated.id} "${updated.name}" (kind=${kind}, tier=${updated.tier}).` +
+          (updated.lastShell
+            ? ` shell exit=${updated.lastShell.code}.`
+            : "") +
+          ` Check schedule action=history id=${updated.id}.`,
         { job: updated, status: "ok" },
       );
     case "locked":
@@ -334,7 +445,9 @@ function handleHistory(
   }
   const lines = rows.map(
     (r) =>
-      `- ${r.endedAt}  ${r.status}  ${r.jobName}(${r.jobId})  src=${r.source}` +
+      `- ${r.endedAt}  ${r.status}  ${r.jobName}(${r.jobId})` +
+      (r.action ? `  kind=${r.action}` : "") +
+      `  src=${r.source}` +
       (r.detail ? `  ${r.detail}` : "") +
       `  runId=${r.runId}`,
   );

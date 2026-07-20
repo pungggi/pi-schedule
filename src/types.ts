@@ -29,7 +29,16 @@ export interface DailySchedule {
   at: string;
 }
 
-export type ScheduleSpec = IntervalSchedule | DailySchedule;
+/** One-shot schedule: fire once after a relative delay, then terminate. */
+export interface OnceSchedule {
+  type: "once";
+  /** Delay in milliseconds. */
+  delayMs: number;
+  /** Original human string, e.g. "10m", "30s". */
+  delay: string;
+}
+
+export type ScheduleSpec = IntervalSchedule | DailySchedule | OnceSchedule;
 
 /**
  * What to do when a job is overdue (nextRunAt far in the past).
@@ -42,8 +51,28 @@ export type MissedWindowPolicy = "catch_up_one" | "skip";
  * Privilege tier for scheduled turns.
  * Enforced two ways: prompt contract + tool_call hook (blocks edit/write/bash
  * for read_only, bash for suggest) while the scheduled turn is active.
+ *
+ * Shell jobs force tier=mutate (command runs outside the agent tool path).
  */
 export type PrivilegeTier = "read_only" | "suggest" | "mutate";
+
+/**
+ * What fires when a job is due.
+ * - prompt: inject isolated agent task (default, original behavior)
+ * - shell: run command via pi.exec; optionally wake agent on result
+ * - notify: UI/console reminder only (no agent turn)
+ * - message: session custom message (display only, no agent turn)
+ */
+export type JobAction = "prompt" | "shell" | "notify" | "message";
+
+/**
+ * When a shell job should wake the agent with a follow-up prompt.
+ * Defaults: always if any follow-up text is set, else never.
+ */
+export type WakeOn = "always" | "failure" | "success" | "never";
+
+/** Why a job stopped firing (terminal state). */
+export type TerminatedReason = "maxRuns" | "once";
 
 /** Job-level last-run status (summary on the job row). */
 export type JobStatus = "ok" | "error" | "skipped" | "locked" | null;
@@ -58,11 +87,40 @@ export type RunStatus =
 
 export type FireSource = "session_start" | "tick" | "run_now";
 
+/** Captured result of a scheduled shell execution (truncated). */
+export interface ShellRunResult {
+  ok: boolean;
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+  code: number;
+  killed: boolean;
+  stdout: string;
+  stderr: string;
+}
+
 export interface ScheduledJob {
   id: string;
   name: string;
-  /** Prompt text injected as a user message when the job fires. */
+  /**
+   * Payload text:
+   * - prompt: agent task body
+   * - notify / message: reminder/message body
+   * - shell: optional default follow-up instruction when waking
+   */
   prompt: string;
+  /** What fires. Default "prompt" (legacy rows omit this). */
+  action: JobAction;
+  /** Shell only: command passed to `bash -lc`. */
+  command?: string;
+  /** Shell only: when to inject an agent follow-up. */
+  wakeOn?: WakeOn;
+  /** Shell only: follow-up when exit 0 and not killed. */
+  successPrompt?: string;
+  /** Shell only: follow-up when non-zero exit or killed. */
+  failurePrompt?: string;
+  /** Shell only: exec timeout in ms. */
+  timeoutMs?: number;
   schedule: ScheduleSpec;
   scope: ScheduleScope;
   /**
@@ -73,8 +131,12 @@ export interface ScheduledJob {
   enabled: boolean;
   /** Overdue handling. Default catch_up_one. */
   missedWindow: MissedWindowPolicy;
-  /** Privilege contract for fired prompts. Default read_only. */
+  /** Privilege contract for agent-waking fires. Default read_only. */
   tier: PrivilegeTier;
+  /** Max successful/errored deliveries before auto-disable (terminal). */
+  maxRuns?: number;
+  /** Terminal state; set when a once job fires or maxRuns is reached. */
+  terminated?: TerminatedReason | null;
   createdAt: string;
   updatedAt: string;
   /** ISO timestamp of last fire attempt (any status), or null if never. */
@@ -87,6 +149,8 @@ export interface ScheduledJob {
   lastError?: string;
   /** Last idempotency key that was successfully delivered. */
   lastIdempotencyKey?: string;
+  /** Last shell result (shell jobs only; truncated). */
+  lastShell?: ShellRunResult;
 }
 
 export interface ScheduleStoreFile {
@@ -96,12 +160,20 @@ export interface ScheduleStoreFile {
 
 export interface CreateJobInput {
   name: string;
-  prompt: string;
+  /** Required for prompt/notify/message; optional follow-up for shell. */
+  prompt?: string;
+  action?: JobAction;
+  command?: string;
+  wakeOn?: WakeOn;
+  successPrompt?: string;
+  failurePrompt?: string;
+  timeoutMs?: number;
   schedule: ScheduleSpec;
   scope: ScheduleScope;
   projectPath?: string;
   missedWindow?: MissedWindowPolicy;
   tier?: PrivilegeTier;
+  maxRuns?: number;
   /** Optional fixed start; defaults to now → next occurrence. */
   now?: Date;
 }
@@ -119,10 +191,12 @@ export interface JobRun {
   status: RunStatus;
   startedAt: string;
   endedAt: string;
-  /** Human reason for skip/lock/error. */
+  /** Human reason for skip/lock/error / shell summary. */
   detail?: string;
   tier: PrivilegeTier;
   missedWindow: MissedWindowPolicy;
+  /** Job action that fired (prompt/shell/…). */
+  action?: JobAction;
 }
 
 export interface DueDecision {

@@ -5,6 +5,7 @@ import {
   decideDue,
   graceMsFor,
   idempotencyKeyFor,
+  tierContract,
 } from "../src/policy.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { ScheduledJob } from "../src/types.js";
@@ -17,6 +18,7 @@ function job(
     id: "abc",
     name: "t",
     prompt: "p",
+    action: "prompt",
     scope: "global",
     enabled: true,
     tier: "read_only",
@@ -122,5 +124,44 @@ describe("CreateRateLimiter", () => {
     expect(lim.tryTake(t0 + 2)).toBe(true);
     expect(lim.tryTake(t0 + 3)).toBe(false);
     expect(lim.tryTake(t0 + 60_001)).toBe(true);
+  });
+});
+
+describe("graceMsFor — daily", () => {
+  it("daily grace is 1h (max of 2×tick and 1h)", () => {
+    const j = job({
+      schedule: parseSchedule("daily at 09:00"),
+      missedWindow: "skip",
+      nextRunAt: "2025-01-01T00:00:00.000Z",
+    });
+    expect(graceMsFor(j, 30_000)).toBe(60 * 60_000);
+  });
+});
+
+describe("decideDue — default policy", () => {
+  it("treats undefined missedWindow as catch_up_one", () => {
+    const j = job({
+      schedule: parseSchedule("every 1h"),
+      missedWindow:
+        undefined as unknown as ScheduledJob["missedWindow"],
+      nextRunAt: "2025-01-01T00:00:00.000Z",
+    });
+    const d = decideDue(j, new Date("2025-01-01T03:00:00.000Z"));
+    expect(d.action).toBe("fire");
+    expect(d.reason).toBe("catch_up_one");
+  });
+});
+
+describe("tierContract", () => {
+  it("renders the suggest privilege block", () => {
+    const text = tierContract("suggest");
+    expect(text).toContain("PRIVILEGE: suggest");
+    expect(text).toContain("draft");
+    expect(text).toContain("do NOT apply");
+  });
+
+  it("renders read_only and mutate blocks", () => {
+    expect(tierContract("read_only")).toContain("PRIVILEGE: read_only");
+    expect(tierContract("mutate")).toContain("PRIVILEGE: mutate");
   });
 });
