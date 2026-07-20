@@ -1,0 +1,69 @@
+name: Release
+
+# Tag-driven publish: push a `v*.*.*` tag and this builds, verifies, and
+# publishes to npm with provenance. Manual `npm publish` is blocked by the
+# prepublishOnly guard in package.json (guarantees version sync + provenance).
+#
+# Prerequisite (one-time): create an npm access token (Automation or Granular,
+# publish permission on `pi-schedule`) and add it as the `NPM_TOKEN` secret in
+# https://github.com/pungggi/pi-schedule/settings/secrets/actions
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (without leading v)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for `npm publish --provenance` (SLSA)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Version-sync guard: package.json version MUST match the tag. Drift
+      # here publishes at a version that doesn't match the git ref. Use
+      # `npm version <X>` locally to bump package.json + tag atomically.
+      - name: Verify package.json version matches tag
+        run: |
+          TAG="${{ steps.ver.outputs.version }}"
+          PKG=$(node -p "require('./package.json').version")
+          echo "tag version:    $TAG"
+          echo "package.json:   $PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "✖ version drift: tag '$TAG' != package.json '$PKG'"
+            echo "Fix: npm version $TAG -m 'release: %s' && git push origin master --follow-tags"
+            exit 1
+          fi
+          echo "✓ versions in sync"
+
+      - name: Publish to npm (with provenance)
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -23,7 +23,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit && vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "node -e \"if(!process.env.CI)throw new Error('publish via release.yml CI: push a v* tag. Manual npm publish is blocked to guarantee provenance + version sync.')\""
   },
   "pi": {
     "extensions": [
@@ -41,6 +42,10 @@
   },
   "bugs": {
     "url": "https://github.com/pungggi/pi-schedule/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "homepage": "https://github.com/pungggi/pi-schedule#readme",
   "engines": {
