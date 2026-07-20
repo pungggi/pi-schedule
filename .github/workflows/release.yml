@@ -1,12 +1,18 @@
 name: Release
 
-# Tag-driven publish: push a `v*.*.*` tag and this builds, verifies, and
-# publishes to npm with provenance. Manual `npm publish` is blocked by the
-# prepublishOnly guard in package.json (guarantees version sync + provenance).
+# Tag-driven publish: push a `v*.*.*` tag → build, verify, publish with provenance.
+# Manual `npm publish` is blocked by package.json prepublishOnly.
 #
-# Prerequisite (one-time): create an npm access token (Automation or Granular,
-# publish permission on `pi-schedule`) and add it as the `NPM_TOKEN` secret in
-# https://github.com/pungggi/pi-schedule/settings/secrets/actions
+# Auth (pick ONE — see docs/PUBLISHING.md):
+#
+#   A) npm Trusted Publishing (OIDC, preferred, no long-lived token)
+#      - On npmjs.com configure this repo + workflow as trusted publisher
+#      - Leave NPM_TOKEN unset (or delete the secret)
+#      - Requires id-token: write (already set below)
+#
+#   B) Classic Automation token in secrets.NPM_TOKEN
+#      - Must be Classic → Automation (bypasses 2FA)
+#      - Granular / Publish tokens that require OTP will fail with EOTP
 
 on:
   push:
@@ -25,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # required for `npm publish --provenance` (SLSA)
+      id-token: write # OIDC for trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,9 +53,6 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
 
-      # Version-sync guard: package.json version MUST match the tag. Drift
-      # here publishes at a version that doesn't match the git ref. Use
-      # `npm version <X>` locally to bump package.json + tag atomically.
       - name: Verify package.json version matches tag
         run: |
           TAG="${{ steps.ver.outputs.version }}"
@@ -63,7 +66,20 @@ jobs:
           fi
           echo "✓ versions in sync"
 
+      # Auth mode: if NPM_TOKEN is set, use it; otherwise rely on OIDC trusted publishing.
+      # A token that still requires OTP will fail with EOTP — use Automation or OIDC only.
       - name: Publish to npm (with provenance)
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "Auth mode: NODE_AUTH_TOKEN (must be Classic Automation or equivalent; OTP-bound tokens fail with EOTP)"
+          else
+            echo "Auth mode: OIDC trusted publishing (no NPM_TOKEN secret)"
+            echo "Ensure npmjs.com → package/user → Trusted Publisher lists:"
+            echo "  repository: pungggi/pi-schedule"
+            echo "  workflow:   release.yml"
+          fi
+          npm publish --access public --provenance
         env:
+          # Empty secret → unset so npm can use OIDC instead of a dead token.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
