@@ -29,6 +29,12 @@ release.yml  ──►  npm ci → typecheck → test → version-sync check →
    ```bash
    npm view pi-schedule version   # 404 = free / not yet published
    ```
+4. **Repo must be public** for `--provenance` (npm sigstore requirement).
+   ```bash
+   gh repo edit pungggi/pi-schedule --visibility public --accept-visibility-change-consequences
+   ```
+   If you must keep it private, remove `--provenance` from `release.yml` and
+   `publishConfig.provenance` from `package.json` (you lose the SLSA badge).
 
 ---
 
@@ -153,6 +159,7 @@ Install: `pi install npm:pi-schedule`
 | Symptom | Fix |
 |---|---|
 | **`EOTP` / one-time password** | Token is not Automation (or Granular still requires OTP). Use **Classic → Automation**, or delete `NPM_TOKEN` and use **Trusted Publisher** OIDC. Then `gh run rerun … --failed`. |
+| **`E422` — "Unsupported … repository visibility: private"** | `--provenance` requires a **public** repo. `gh repo edit pungggi/pi-schedule --visibility public --accept-visibility-change-consequences`. (Or drop `--provenance` + `publishConfig.provenance` if you must stay private.) |
 | `ENEEDAUTH` / 403 | No token and no trusted publisher. Configure §2 A or B. |
 | `version drift: tag != package.json` | `npm version <X> -m 'release: %s'` then push tags. |
 | Provenance `ENOTSUPPORTED` | Needs GHA + `id-token: write` (already set) + public repo. |
