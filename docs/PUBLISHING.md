@@ -43,27 +43,21 @@ release.yml  ──►  npm ci → typecheck → test → version-sync check →
 ### Option A — Trusted Publishing / OIDC (preferred, no long-lived token)
 
 No `NPM_TOKEN`. GitHub Actions proves identity via OIDC (`id-token: write` is
-already in `release.yml`).
+already in `release.yml`). Requires **npm ≥ 11.5.1** (workflow upgrades npm)
+and must **not** export an empty `NODE_AUTH_TOKEN` (that breaks OIDC).
 
 1. Sign in at [npmjs.com](https://www.npmjs.com).
-2. **If the package does not exist yet** (first publish):
-   - Account → **Access Tokens** is *not* enough alone for OIDC on a brand-new
-     name in some cases. Prefer **Option B once** for the first claim, *or*
-     configure a trusted publisher under your user/org if npm shows that UI
-     for “pending” packages.
-   - After `0.3.0` exists: package page → **Settings → Trusted Publisher**.
-3. **If the package already exists**: open
-   `https://www.npmjs.com/package/pi-schedule` → **Settings → Trusted Publisher**
+2. Open `https://www.npmjs.com/package/pi-schedule` → **Settings → Trusted Publisher**
    → Add GitHub Actions:
    - **Organization or user:** `pungggi`
    - **Repository:** `pi-schedule`
    - **Workflow filename:** `release.yml` (exact name, no path)
    - Environment: leave empty unless you use GitHub Environments
-4. On GitHub, **delete** a bad token so it cannot override OIDC:
+3. On GitHub, **delete** a bad/legacy token so it cannot override OIDC:
    ```bash
    gh secret delete NPM_TOKEN --repo pungggi/pi-schedule
    ```
-5. Re-run the release job (see §5).
+4. Re-run the release job (see §5).
 
 Docs: https://docs.npmjs.com/trusted-publishers
 
