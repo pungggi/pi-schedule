@@ -8,6 +8,8 @@
     "schedule",
     "cron",
     "recurring",
+    "polling",
+    "monitor",
     "tasks"
   ],
   "type": "module",
