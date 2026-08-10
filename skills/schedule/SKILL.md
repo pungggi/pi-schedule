@@ -92,6 +92,7 @@ schedule
 - `wakeOn` default: `always` if any follow-up text (`prompt` / `successPrompt` / `failurePrompt`) is set, else `never`.
 - Prefer **`wakeOn=failure`** for polls (pipeline, deploy, tests) so green stays silent.
 - Follow-up priority: `successPrompt` → `failurePrompt` → `prompt` → generic review text.
+- **Windows shell:** jobs run via Git Bash (MSYS) — the bare `bash` is ambiguous (PATH can resolve to the WSL launcher, which exits non-zero with no execution when no distro is installed). Override the binary with `PI_SCHEDULE_SHELL=/absolute/path/to/bash`.
 
 Do **not** use `kind=shell` for open-ended investigation — use `kind=prompt` with `tier=mutate` so the agent chooses commands.
 
