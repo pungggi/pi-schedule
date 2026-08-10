@@ -18,7 +18,7 @@ import type {
 import { RunLedger } from "../src/ledger.js";
 import { JobLockManager } from "../src/lock.js";
 import { PrivilegeGuard } from "../src/privilege.js";
-import { ScheduleRunner } from "../src/runner.js";
+import { ScheduleRunner, resolveShell } from "../src/runner.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { PrivilegeTier, ScheduledJob } from "../src/types.js";
@@ -468,7 +468,7 @@ describe("ScheduleRunner — action kinds", () => {
     await h.runner.fireDue(h.ctx, { source: "session_start" });
 
     expect(h.execCalls).toHaveLength(1);
-    expect(h.execCalls[0]?.command).toBe("bash");
+    expect(h.execCalls[0]?.command).toBe(resolveShell());
     expect(h.execCalls[0]?.args).toEqual(["-lc", "glab ci view"]);
     expect(h.sent).toHaveLength(0);
     expect(h.privilege.depth()).toBe(0);
@@ -476,6 +476,30 @@ describe("ScheduleRunner — action kinds", () => {
     expect(after.lastStatus).toBe("ok");
     expect(after.lastShell?.code).toBe(0);
     expect(after.lastShell?.stdout).toContain("green");
+  });
+
+  it("shell: honors PI_SCHEDULE_SHELL override for the shell binary", async () => {
+    const prev = process.env["PI_SCHEDULE_SHELL"];
+    process.env["PI_SCHEDULE_SHELL"] = "/custom/bin/bash";
+    try {
+      const h = makeHarness({ execResult: { stdout: "ok\n", code: 0 } });
+      const job = h.store.create({
+        name: "ci",
+        prompt: "",
+        action: "shell",
+        command: "echo hi",
+        wakeOn: "never",
+        tier: "mutate",
+        schedule: parseSchedule("every 1h"),
+        scope: "global",
+      });
+      h.forceDue(job.id);
+      await h.runner.fireDue(h.ctx, { source: "session_start" });
+      expect(h.execCalls[0]?.command).toBe("/custom/bin/bash");
+    } finally {
+      if (prev === undefined) delete process.env["PI_SCHEDULE_SHELL"];
+      else process.env["PI_SCHEDULE_SHELL"] = prev;
+    }
   });
 
   it("shell: wakes agent on failure when wakeOn=failure", async () => {

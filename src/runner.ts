@@ -15,6 +15,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import {
   DEFAULT_JOB_ACTION,
   DEFAULT_SHELL_TIMEOUT_MS,
@@ -49,6 +50,42 @@ import type {
 
 /** How often the in-session ticker checks for due jobs. */
 export const TICK_MS = 30_000;
+
+/**
+ * Candidate Git Bash (MSYS) binaries on Windows, in preference order. The bare
+ * `"bash"` is ambiguous on Windows: PATH resolution can pick
+ * `C:\Windows\System32\bash.exe` (the WSL launcher), which exits non-zero
+ * with NO execution when no WSL distro is installed (`execvpe(/bin/bash)
+ * failed`). Git Bash matches pi's own bash tool + the `/c/` path conventions
+ * in `shellCommandPrefix`, so prefer it.
+ */
+const WIN_GIT_BASH_PATHS = [
+  "C:\\Program Files\\Git\\bin\\bash.exe",
+  "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+  "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+];
+
+/**
+ * Resolve the shell binary passed to `pi.exec` for shell jobs.
+ *
+ * - `PI_SCHEDULE_SHELL` env (absolute path) wins outright — lets users force a
+ *   specific binary without a release.
+ * - On Windows, prefer the first existing Git Bash (see {@link WIN_GIT_BASH_PATHS}).
+ * - Otherwise fall back to `"bash"` (POSIX; the historic behavior).
+ */
+export function resolveShell(): string {
+  const override = process.env["PI_SCHEDULE_SHELL"];
+  if (override) return override;
+  if (process.platform !== "win32") return "bash";
+  for (const candidate of WIN_GIT_BASH_PATHS) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // permission / race — try the next candidate
+    }
+  }
+  return "bash";
+}
 
 const FIRE_ON_REASONS = new Set(["startup", "new", "resume"]);
 const ERROR_NOTIFY_COOLDOWN_MS = 5 * 60_000;
@@ -327,7 +364,7 @@ export class ScheduleRunner {
       );
     }
 
-    const execResult = await this.opts.pi.exec("bash", ["-lc", command], {
+    const execResult = await this.opts.pi.exec(resolveShell(), ["-lc", command], {
       cwd,
       timeout: timeoutMs,
     });
