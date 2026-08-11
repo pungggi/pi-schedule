@@ -11,7 +11,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { PrivilegeGuard } from "../src/privilege.js";
 
-type BlockResult = { block?: boolean; reason?: string } | undefined;
+type BlockResult =
+  | { block?: boolean; reason?: string; terminate?: boolean }
+  | undefined;
 
 function setup() {
   let toolCall:
@@ -91,6 +93,33 @@ describe("PrivilegeGuard tier enforcement", () => {
     for (const name of [...MUTATE_TOOLS, ...READ_TOOLS]) {
       expect(await call(name)).toBeUndefined();
     }
+  });
+
+  it("privilege blocks set terminate:true (pi ≥ 0.84.1) so off-contract batches end without a wasted model turn", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    // every mutating-tool block signals terminate
+    for (const name of MUTATE_TOOLS) {
+      const res = await call(name);
+      expect(res?.block).toBe(true);
+      expect(res?.terminate).toBe(true);
+    }
+    // schedule-mutation blocks too
+    for (const action of ["create", "cancel", "run_now"]) {
+      expect((await call("schedule", { action }))?.terminate).toBe(true);
+    }
+    // suggest tier: bash + schedule mutations also terminate
+    guard.enter("suggest");
+    expect((await call("bash"))?.terminate).toBe(true);
+    expect((await call("schedule", { action: "create" }))?.terminate).toBe(true);
+    // allowed tools never set terminate (no result returned at all)
+    guard.enter("read_only");
+    for (const name of READ_TOOLS) {
+      expect(await call(name)).toBeUndefined();
+    }
+    // no scheduled turn → no block, no terminate
+    guard.clear();
+    expect(await call("bash")).toBeUndefined();
   });
 
   it("read_only blocks schedule create (shell-escalation guard) but allows list/history", async () => {

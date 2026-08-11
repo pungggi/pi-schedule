@@ -148,6 +148,15 @@ is later replayed as a user message — a **stored-instruction persistence vecto
 Privilege enters **only when an agent turn starts** (prompt jobs, or shell jobs
 that wake). `notify` / `message` / quiet shell runs do not push the stack.
 
+**Early terminate (pi ≥ 0.84.1):** privilege blocks also set `terminate: true`
+on the `tool_call` result. A scheduled `read_only`/`suggest` turn that attempts
+a mutating tool has left its contract — there is nothing useful left to do
+inside the fence, so a fully-blocked batch ends the turn without a follow-up
+model call (no token burn on a doomed retry or apology). Batch semantics keep
+this safe: a mixed batch that also ran allowed read tools does *not* terminate,
+so the agent can still report its findings in text. On pi < 0.84.1 the field is
+ignored and blocks behave as before.
+
 **Shell jobs** always store `tier=mutate`. The command itself runs via
 `pi.exec` (outside the agent tool path) — that is intentional for CI polls,
 but it is a real local-execution surface. Prefer narrow commands and

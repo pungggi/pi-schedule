@@ -1,6 +1,6 @@
 {
   "name": "pi-schedule",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Scheduled actions for pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
   "keywords": [
     "pi-package",
@@ -60,7 +60,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": ">=0.80.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.1",
     "@types/node": "^22.0.0",
     "typebox": "^1.0.0",
     "typescript": "^5.9.0",
