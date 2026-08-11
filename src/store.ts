@@ -15,6 +15,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -183,65 +184,114 @@ function writeStoreFile(filePath: string, store: ScheduleStoreFile): void {
   renameSync(tmp, filePath);
 }
 
-/** Per-file exclusive lock for read-modify-write of schedule JSON. */
+/** Try to create a lock file exclusively; false if it already exists. */
+function tryCreateLock(lockPath: string, body: string): boolean {
+  try {
+    writeFileSync(lockPath, body, { flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is the lock holder genuinely stale (held longer than LOCK_STALE_MS)?
+ *
+ * Staleness is read from the lock file mtime so it works across body formats
+ * and legacy locks (older releases wrote a bare token string). On stat failure
+ * returns false — never assume stale; let retries continue and then fail
+ * loudly via StoreError.
+ */
+function isLockStale(lockPath: string, now: number = Date.now()): boolean {
+  try {
+    const st = statSync(lockPath);
+    return now - st.mtimeMs > LOCK_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Synchronous bounded backoff between lock retries (see docs/CODE-REVIEW.md P2). */
+function backoff(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    /* spin */
+  }
+}
+
+/** Read back the token of the current holder, or undefined if unreadable. */
+function readLockToken(lockPath: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(lockPath, "utf8")) as {
+      token?: unknown;
+    };
+    return typeof parsed.token === "string" ? parsed.token : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Per-file exclusive lock for read-modify-write of schedule JSON.
+ *
+ * Only a genuinely stale holder (mtime older than LOCK_STALE_MS) is ever taken
+ * over — never a fresh, active writer. Force-stealing a fresh lock would lose
+ * concurrent RMW writes, which is exactly the race this lock exists to prevent.
+ * Stale takeover uses rename (not unlink) so at most one racer claims the orphan.
+ */
 function withFileLock<T>(filePath: string, fn: () => T): T {
   const lockPath = `${filePath}.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
-  const token = `${process.pid}-${Date.now()}`;
+  const token = `${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const body = JSON.stringify({
+    pid: process.pid,
+    token,
+    at: new Date().toISOString(),
+  });
   let acquired = false;
 
   for (let i = 0; i < LOCK_RETRIES; i++) {
-    try {
-      writeFileSync(lockPath, token, { flag: "wx" });
+    if (tryCreateLock(lockPath, body)) {
       acquired = true;
       break;
-    } catch {
-      // Stale lock takeover via rename.
+    }
+
+    // Contended. Steal only when the holder is genuinely stale.
+    if (isLockStale(lockPath)) {
+      const dead = `${lockPath}.dead.${token}`;
       try {
-        if (existsSync(lockPath)) {
-          const raw = readFileSync(lockPath, "utf8");
-          // crude age: if lock body is old format without timestamp, still try after retries
-          void raw;
-          const st = existsSync(lockPath);
-          if (st && i === LOCK_RETRIES - 1) {
-            const dead = `${lockPath}.dead.${token}`;
-            try {
-              renameSync(lockPath, dead);
-              try {
-                unlinkSync(dead);
-              } catch {
-                /* ignore */
-              }
-              writeFileSync(lockPath, token, { flag: "wx" });
-              acquired = true;
-              break;
-            } catch {
-              /* continue */
-            }
-          }
-        }
+        renameSync(lockPath, dead);
       } catch {
-        /* continue */
+        // Another racer won the takeover, or the holder just released. Loop.
       }
-      // Brief sync backoff (avoid SharedArrayBuffer — not always available).
-      const end = Date.now() + LOCK_RETRY_MS;
-      while (Date.now() < end) {
-        /* spin */
+      try {
+        unlinkSync(dead);
+      } catch {
+        /* a leftover dead file is harmless */
+      }
+      if (tryCreateLock(lockPath, body)) {
+        acquired = true;
+        break;
       }
     }
+
+    backoff(LOCK_RETRY_MS);
   }
 
   if (!acquired) {
     throw new StoreError(
-      `Could not acquire store lock for ${basename(filePath)} (another session busy?).`,
+      `Could not acquire store lock for ${basename(filePath)} ` +
+        `(another session busy, or a lock newer than ${Math.round(LOCK_STALE_MS / 1000)}s).`,
     );
   }
 
   try {
     return fn();
   } finally {
+    // Release only if we still own it (token match guards a stale-takeover
+    // victim from unlinking the new owner's file).
     try {
-      if (existsSync(lockPath) && readFileSync(lockPath, "utf8") === token) {
+      if (existsSync(lockPath) && readLockToken(lockPath) === token) {
         unlinkSync(lockPath);
       }
     } catch {
@@ -249,8 +299,6 @@ function withFileLock<T>(filePath: string, fn: () => T): T {
     }
   }
 }
-
-void LOCK_STALE_MS;
 
 export class ScheduleStore {
   constructor(private readonly paths: StorePaths = defaultPaths()) {}

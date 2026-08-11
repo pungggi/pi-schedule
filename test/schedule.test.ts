@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   computeNextRunAt,
   formatRelative,
@@ -194,5 +194,67 @@ describe("formatRelative", () => {
     expect(formatRelative("2025-01-01T09:00:00.000Z", now)).toBe("3h ago");
     expect(formatRelative("2025-01-03T12:00:00.000Z", now)).toBe("in 2d");
     expect(formatRelative("2024-12-30T12:00:00.000Z", now)).toBe("2d ago");
+  });
+});
+
+// DST edge cases for the daily wall-clock path (localWallClock is private, so
+// we drive it through the public computeNextRunAt). Node 22 honors a runtime
+// process.env.TZ change, so we pin the worker to America/New_York per test and
+// restore after. Vitest isolates test files into separate workers, so this
+// never leaks into other files.
+describe("computeNextRunAt — DST (America/New_York)", () => {
+  const origTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  beforeEach(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterEach(() => {
+    process.env.TZ = origTz;
+  });
+
+  it("spring-forward gap: daily at 02:30 walks to the next valid day (Mar 9 → Mar 10, 2025)", () => {
+    // US Eastern springs forward 2025-03-09 02:00 → 03:00, so 02:30 does not exist.
+    const from = new Date(2025, 2, 9, 0, 0, 0, 0); // Mar 9 00:00 local
+    const next = computeNextRunAt(parseSchedule("daily at 02:30"), from, {
+      inclusive: true,
+    });
+    // 02:30 on Mar 9 is nonexistent → localWallClock guard walks forward to Mar 10.
+    expect(next.getMonth()).toBe(2);
+    expect(next.getDate()).toBe(10);
+    expect(next.getHours()).toBe(2);
+    expect(next.getMinutes()).toBe(30);
+  });
+
+  it("spring-forward day: a time outside the gap (09:00) still fires same day", () => {
+    const from = new Date(2025, 2, 9, 0, 0, 0, 0);
+    const next = computeNextRunAt(parseSchedule("daily at 09:00"), from, {
+      inclusive: true,
+    });
+    expect(next.getMonth()).toBe(2);
+    expect(next.getDate()).toBe(9); // not skipped — 09:00 is not in the gap
+    expect(next.getHours()).toBe(9);
+  });
+
+  it("spring-forward gap with exclusive reschedule (after-fire): next valid day", () => {
+    // A job that just fired around Mar 9; the next 02:30 is Mar 10 (gap day skipped).
+    const from = new Date(2025, 2, 9, 0, 0, 0, 0);
+    const next = computeNextRunAt(parseSchedule("daily at 02:30"), from);
+    expect(next.getDate()).toBe(10);
+    expect(next.getHours()).toBe(2);
+  });
+
+  it("fall-back: daily at 01:30 on Nov 2 2025 resolves without error (01:30 exists twice)", () => {
+    // US Eastern falls back 2025-11-02 02:00 → 01:00, so 01:30 occurs twice.
+    // The platform picks one of the two instants; we only assert the wall clock
+    // and that the result is a finite, same-day time (no NaN, no infinite loop).
+    const from = new Date(2025, 10, 2, 0, 0, 0, 0); // Nov 2 00:00 local
+    const next = computeNextRunAt(parseSchedule("daily at 01:30"), from, {
+      inclusive: true,
+    });
+    expect(Number.isFinite(next.getTime())).toBe(true);
+    expect(next.getMonth()).toBe(10);
+    expect(next.getDate()).toBe(2);
+    expect(next.getHours()).toBe(1);
+    expect(next.getMinutes()).toBe(30);
   });
 });
