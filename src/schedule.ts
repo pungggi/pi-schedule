@@ -241,7 +241,10 @@ export function formatRelative(iso: string, now: Date = new Date()): string {
   if (minutes < 60) return `${sign === "ago" ? "" : "in "}${minutes}m${sign === "ago" ? " ago" : ""}`;
 
   const hours = Math.round(abs / 3_600_000);
-  if (hours < 48) return `${sign === "ago" ? "" : "in "}${hours}h${sign === "ago" ? " ago" : ""}`;
+  // Threshold on raw abs (not rounded hours) so 47.5h doesn't round up to 48h
+  // and then jump to "2d" while 47.4h shows "47h".
+  if (abs < 48 * 3_600_000)
+    return `${sign === "ago" ? "" : "in "}${hours}h${sign === "ago" ? " ago" : ""}`;
 
   const days = Math.round(abs / 86_400_000);
   return `${sign === "ago" ? "" : "in "}${days}d${sign === "ago" ? " ago" : ""}`;

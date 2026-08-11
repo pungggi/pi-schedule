@@ -361,6 +361,9 @@ export class ScheduleRunner {
       throw new Error(`shell job "${job.name}" has no command`);
     }
 
+    // Global jobs have no projectPath, so they run in the session cwd — a
+    // relative command is therefore session-dependent. Prefer absolute
+    // commands or a project-scoped job for a deterministic cwd.
     const cwd = job.projectPath ?? ctx.cwd ?? this.cwd;
     const timeoutMs = job.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
 

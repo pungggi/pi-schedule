@@ -82,8 +82,7 @@ export type RunStatus =
   | "delivered"
   | "error"
   | "skipped"
-  | "locked"
-  | "busy";
+  | "locked";
 
 export type FireSource = "session_start" | "tick" | "run_now";
 
