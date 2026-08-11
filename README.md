@@ -35,6 +35,12 @@ pi -e ./src/extension.ts
 
 Storage is **daemon-ready**: each job tracks `nextRunAt` / `lastRunAt` so a future headless runner can share the same files.
 
+**Compatibility:** works on any pi ≥ 0.74. On pi ≥ 0.84.1, privilege blocks also
+*terminate* the scheduled turn early — a read-only/suggest job that attempts a
+mutating tool ends without a wasted follow-up model call (mixed read+mutate
+batches still report findings in text). On older pi the extra field is ignored
+and blocks behave as before.
+
 ## Agent skill
 
 The package ships a **`schedule` skill** (`skills/schedule/SKILL.md`) that
@@ -167,6 +173,11 @@ jobId: …
 ## Reliability
 
 Deep dive: **[docs/RELIABILITY.md](docs/RELIABILITY.md)**
+
+Forward-looking design notes:
+
+- **[docs/RELIABILITY.md](docs/RELIABILITY.md)** — failure modes & mitigations
+- **[docs/FUTURE-per-job-models.md](docs/FUTURE-per-job-models.md)** — per-job model selection spike (upstream-blocked on pi)
 
 Summary of MVP mitigations:
 
