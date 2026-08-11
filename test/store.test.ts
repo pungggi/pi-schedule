@@ -337,6 +337,26 @@ describe("ScheduleStore — legacy & edge cases", () => {
     expect(store.countInScope("project")).toBeGreaterThanOrEqual(0);
   });
 
+  it("two store instances writing the same file don't lose jobs (cross-session RMW)", () => {
+    const { store, paths, project } = tempStore();
+    const other = new ScheduleStore(paths); // separate instance, same on-disk files
+    const a = store.create({
+      name: "a",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    const b = other.create({
+      name: "b",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    // Each upsert re-reads inside the lock, so B's write must not clobber A's job.
+    const ids = store.listForCwd(project).map((j) => j.id).sort();
+    expect(ids).toEqual([a.id, b.id].sort());
+  });
+
   it("defaultScope: project when .pi exists, else global", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-sched-scope-"));
     temps.push(root);

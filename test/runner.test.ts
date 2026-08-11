@@ -35,6 +35,7 @@ interface HarnessOpts {
   sendThrows?: boolean;
   hasInitialPrompt?: boolean;
   hasUI?: boolean;
+  noSendMessage?: boolean;
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
   execThrows?: boolean;
 }
@@ -72,15 +73,17 @@ function makeHarness(opts: HarnessOpts = {}) {
       if (opts.sendThrows) throw new Error("boom");
       sent.push({ content, deliverAs: o?.deliverAs });
     },
-    sendMessage(
-      message: { content: string },
-      o?: { triggerTurn?: boolean },
-    ): void {
-      customMessages.push({
-        content: message.content,
-        triggerTurn: o?.triggerTurn,
-      });
-    },
+    sendMessage: opts.noSendMessage
+      ? undefined
+      : (
+          message: { content: string },
+          o?: { triggerTurn?: boolean },
+        ): void => {
+          customMessages.push({
+            content: message.content,
+            triggerTurn: o?.triggerTurn,
+          });
+        },
     async exec(
       command: string,
       args: string[],
@@ -162,6 +165,26 @@ function makeHarness(opts: HarnessOpts = {}) {
     },
     emit: async (event: string, e?: unknown) => {
       for (const h of handlers[event] ?? []) await h(e, ctx);
+    },
+    toolCall: async (
+      toolName: string,
+      input?: unknown,
+    ): Promise<
+      { block?: boolean; reason?: string; terminate?: boolean } | undefined
+    > => {
+      for (const fn of handlers["tool_call"] ?? []) {
+        const r = await (
+          fn as (
+            e: unknown,
+            c: unknown,
+          ) => Promise<
+            | { block?: boolean; reason?: string; terminate?: boolean }
+            | undefined
+          >
+        )({ toolName, input }, ctx);
+        if (r) return r;
+      }
+      return undefined;
     },
   };
 }
@@ -686,5 +709,64 @@ describe("ScheduleRunner — termination (once / maxRuns)", () => {
     const row = h.store.get(job.id, h.project)!;
     expect(row.lastStatus).toBe("error");
     expect(row.terminated).toBe("once");
+  });
+});
+
+describe("ScheduleRunner — review P2 follow-ups", () => {
+  it("message action degrades to console when sendMessage is unavailable", async () => {
+    const h = makeHarness({ noSendMessage: true });
+    const job = h.store.create({
+      name: "note",
+      prompt: "ctx for later",
+      action: "message",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    h.forceDue(job.id);
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+    expect(h.customMessages).toHaveLength(0); // no custom-message channel
+    expect(spy).toHaveBeenCalled(); // fell back to console, not a throw
+    expect(h.store.get(job.id, h.project)?.lastStatus).toBe("ok");
+    spy.mockRestore();
+  });
+
+  it("run_now serializes: concurrent run_now waves both deliver (never drop)", async () => {
+    const h = makeHarness();
+    const a = h.createGlobal("a");
+    const b = h.createGlobal("b");
+    h.forceDue(a.id);
+    h.forceDue(b.id);
+    // Auto waves drop when one is active; run_now must chain and both deliver.
+    const p1 = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [a.id] });
+    const p2 = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [b.id] });
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toHaveLength(1);
+    expect(r2).toHaveLength(1);
+    expect(h.sent).toHaveLength(2);
+  });
+
+  it("a fired read_only turn structurally blocks bash via tool_call (e2e)", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal("guard", "read_only");
+    h.forceDue(job.id);
+    h.runner.attach(); // registers the privilege tool_call hook
+    await h.emit("session_start", { type: "session_start", reason: "new" });
+    expect(h.privilege.depth()).toBe(1); // read_only pushed by the fire
+
+    // bash is blocked and the batch is told to terminate (off-contract).
+    const blocked = await h.toolCall("bash");
+    expect(blocked).toMatchObject({ block: true, terminate: true });
+
+    // read tools and schedule reads stay allowed under the same active tier.
+    expect(await h.toolCall("read")).toBeUndefined();
+    expect(await h.toolCall("schedule", { action: "list" })).toBeUndefined();
+    // schedule mutations are blocked end-to-end (escalation guard).
+    expect(
+      (await h.toolCall("schedule", { action: "create" }))?.block,
+    ).toBe(true);
+
+    await h.emit("session_shutdown");
+    expect(h.privilege.depth()).toBe(0);
   });
 });

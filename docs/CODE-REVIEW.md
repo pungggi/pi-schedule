@@ -3,9 +3,9 @@
 A deep, theme-grouped review of the `pi-schedule` codebase (`src/` 13 files /
 ~3,037 lines, `test/` 13 files / ~2,800 lines, plus docs, CI, README/SKILL).
 
-**Health check:** `tsc --noEmit` ✅ · `vitest run` → 167/167 ✅ (162 at
-review time; +4 DST, +1 fresh-lock regression) · `npm pack` guard enforced in
-CI ✅
+**Health check:** `tsc --noEmit` ✅ · `vitest run` → 173/173 ✅ (162 at
+review time; +4 DST, +1 fresh-lock regression, +6 P2) · `npm pack` guard
+enforced in CI ✅
 
 Overall this is a **well-engineered, reliability-focused** package. The
 `docs/RELIABILITY.md` threat-model → mitigation mapping is excellent, the
@@ -23,11 +23,11 @@ Updated as findings are addressed on branch `fix/p1-store-lock-and-dst-tests`.
 |-----|---------|----------|--------|
 | 🔴 P1 | Store file lock force-steals non-stale locks (no staleness check; `LOCK_STALE_MS` dead) | `store.ts:45,223-244,253` | ✅ done |
 | 🔴 P1 | DST spring-forward logic in `localWallClock` is untested | `schedule.ts:138` / no test | ✅ done |
-| 🟡 P2 | `message` action hard-throws if `pi.sendMessage` absent (siblings use `?.`) | `runner.ts:315` | ⬜ open |
-| 🟡 P2 | Error path records stale `job`, success path uses `fresh` | `runner.ts:578` vs `:541/:504` | ⬜ open |
-| 🟡 P2 | Spin-wait blocks event loop up to 500 ms | `store.ts:247` | ⬜ open |
-| 🟡 P2 | Privilege stack couples to host's 1-settle-per-turn invariant (no defensive cap/TTL) | `privilege.ts:101` | ⬜ open |
-| 🟡 P2 | Cross-session RMW merge + run_now/tick serialization + ledger eviction untested | `test/` | ⬜ open |
+| 🟡 P2 | `message` action hard-throws if `pi.sendMessage` absent (siblings use `?.`) | `runner.ts:315` | ✅ done |
+| 🟡 P2 | Error path records stale `job`, success path uses `fresh` | `runner.ts:578` vs `:541/:504` | ✅ done |
+| 🟡 P2 | Spin-wait blocks event loop up to 500 ms | `store.ts:247` | ✅ done |
+| 🟡 P2 | Privilege stack couples to host's 1-settle-per-turn invariant (no defensive cap/TTL) | `privilege.ts:101` | ✅ done |
+| 🟡 P2 | Cross-session RMW merge + run_now/tick serialization + ledger eviction untested | `test/` | ✅ done |
 | 🟢 P3 | `"busy"` RunStatus declared but never written | `types.ts:86` / `runner.ts:486` | ⬜ open |
 | 🟢 P3 | `markRan` deprecated-and-only-tested; dead `LOCK_STALE_MS`+`void` | `store.ts:405,253` | ✅ `LOCK_STALE_MS` fixed via P1; `markRan` ⬜ open |
 | 🟢 P3 | Global shell job cwd is implicit/session-dependent | `runner.ts:367` | ⬜ open |
@@ -89,6 +89,11 @@ lock mtime so it is genuinely stale. Suite 162 → 167, all green.
 full-CPU block). File locks are inherently sync here, but a pure spin is the
 worst option. Consider `Atomics.wait` or shorter sleep slices.
 
+> ✅ **Resolved.** `backoff()` now uses `Atomics.wait` on a module-level
+> `SharedArrayBuffer`-backed `Int32Array` — a true blocking sleep with no CPU
+> spin (allowed on Node's main thread, verified), with a spin fallback if SAB
+> is unavailable.
+
 ### 🟢 Strengths
 - **At-most-once is durable:** primary signal is `job.lastIdempotencyKey` on the
   store row (survives ledger eviction), re-checked *after* lock acquire. Correct
@@ -106,12 +111,22 @@ worst option. Consider `Atomics.wait` or shorter sleep slices.
 (`sendMessage?.`) degrade gracefully; `message` (`sendMessage(`) throws if
 absent → error path. Make consistent or validate `sendMessage` at `attach()`.
 
+> ✅ **Resolved.** The `message` branch now guards `if (pi.sendMessage)` and
+> falls back to `console.log(notifyLabel(job))` when the channel is absent —
+> matching notify/shell's optional treatment. New test covers the no-channel
+> path (still `lastStatus: ok`).
+
 ### 🟡 (P2) Error path records stale `job`, success path records `fresh`
 `runner.ts` re-reads into `fresh` after lock acquire and uses it on the **ok**
 and **post-lock-skip** paths, but the **error catch** and **pre-lock skips**
 still pass the original stale `job`. If `tier`/`schedule`/`action` changed
 between candidate-read and lock-acquire, the error ledger entry and computed
 `nextRunAt` reflect old values.
+
+> ✅ **Resolved.** The error catch now re-reads `errorSubject = store.get(...) ??
+> job` inside the lock and derives `errorKey`/tier/missedWindow/action from it,
+> so the advance + forensic ledger reflect the freshest job (consistent with
+> the success path).
 
 ### 🟢 (P3) `JobRun.status = "busy"` is defined but never written
 `types.ts` declares `"busy"` and `RELIABILITY.md` documents it, but the over-cap
@@ -139,6 +154,11 @@ relies on a host invariant (one turn at a time, one settle per fired prompt)
 that this code does not enforce. Double-settle → under-enforcement; no-settle →
 tier leaks until `session_shutdown.clear()`. Consider a defensive cap + the host
 invariant stated in a comment.
+
+> ✅ **Resolved.** `enter()` now caps the stack at `MAX_DEPTH = 16` (drops
+> oldest-first) as a safety valve against a host-invariant breach, and the
+> `agent_settled` handler comment states the invariant explicitly. New test
+> verifies the cap (30 enters → depth 16).
 
 ### 🟢 `enter()` is called synchronously after `sendUserMessage`
 Single-threaded JS guarantees the tool_call hook can't fire before `enter`
@@ -207,11 +227,20 @@ run_now bypass, missed-window skip, error-advance, lock contention, termination.
    2025-11-02 resolves without error).
 2. **Cross-session RMW merge under contention** — takeover is tested, not that
    two stores doing interleaved `upsert` of *different* jobs never lose writes.
+   ✅ **Resolved** — `store.test.ts` now writes two jobs via two `ScheduleStore`
+   instances on the same files and asserts both persist (re-read-inside-lock).
 3. **`run_now` ↔ active-tick serialization** — `waveChain` chaining untested.
+   ✅ **Resolved** — `runner.test.ts` fires two concurrent `run_now` waves and
+   asserts both deliver (never drop, unlike auto waves).
 4. **Ledger eviction** — no test that `wasDelivered` returns false after a
    delivered key ages out of the 200-line window.
+   ✅ **Resolved** — `ledger.test.ts` fills past `MAX_HISTORY` and asserts the
+   early `delivered` key ages out while a recent one is still seen.
 5. **Privilege ↔ runner end-to-end** — no integration test that a tool_call
    *during* a fired read_only turn is actually blocked.
+   ✅ **Resolved** — `runner.test.ts` now attaches the runner, fires a
+   read_only job, and drives the captured `tool_call` hook: `bash` is blocked
+   (+`terminate`), reads + schedule reads allowed, schedule mutations blocked.
 6. **Windows Git-Bash discovery** — untestable on Linux CI by nature; the
    `PI_SCHEDULE_SHELL` override is tested (right tradeoff).
 
@@ -263,3 +292,10 @@ but these are effectively per-machine. Document explicitly or un-ignore
   DST spring-forward & fall-back now covered by TZ-pinned tests. `LOCK_STALE_MS`
   dead code removed. Suite 162 → 167, typecheck clean. Branch:
   `fix/p1-store-lock-and-dst-tests`.
+- **2026-08-11** — ✅ P2 done (branch `fix/p2-review-followups`, stacked on P1).
+  `message` action degrades to console when `sendMessage` is absent; error path
+  re-reads the fresh job for the advance + ledger; lock `backoff()` now uses
+  `Atomics.wait` (no CPU spin); `PrivilegeGuard.enter()` caps stack growth at
+  `MAX_DEPTH=16` + documents the host invariant. New tests: ledger eviction,
+  privilege cap, message fallback, run_now serialization, privilege↔runner e2e,
+  cross-session RMW. Suite 167 → 173, typecheck clean.
