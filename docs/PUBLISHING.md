@@ -10,7 +10,7 @@ Manual `npm publish` is intentionally blocked by the `prepublishOnly` guard in
 provenance + a clean test run).
 
 ```
-git tag v0.3.0 && git push origin v0.3.0
+git tag vX.Y.Z && git push origin vX.Y.Z
         │
         ▼
 release.yml  ──►  npm ci → typecheck → test → version-sync check → npm publish --provenance
@@ -23,18 +23,18 @@ release.yml  ──►  npm ci → typecheck → test → version-sync check →
 
 ## 1. Prerequisites (one-time)
 
-1. An **npm account** (`https://www.npmjs.com/signup`).
-2. **2FA enabled** on the account (required for modern publish).
-3. Confirm the package name is free (or you own it):
-   ```bash
-   npm view pi-schedule version   # 404 = free / not yet published
-   ```
-4. **Repo must be public** for `--provenance` (npm sigstore requirement).
+1. An **npm account** (`https://www.npmjs.com/signup`) with **2FA enabled**
+   (required for modern publish).
+2. **Repo must be public** for `--provenance` (npm sigstore requirement).
    ```bash
    gh repo edit pungggi/pi-schedule --visibility public --accept-visibility-change-consequences
    ```
    If you must keep it private, remove `--provenance` from `release.yml` and
    `publishConfig.provenance` from `package.json` (you lose the SLSA badge).
+
+> The package is already on npm; releases use OIDC trusted publishing (§2 A) by
+> default. The one-time first-publish bootstrap (manual, without provenance, to
+> attach the Trusted Publisher) is a one-off already completed.
 
 ---
 
@@ -43,12 +43,12 @@ release.yml  ──►  npm ci → typecheck → test → version-sync check →
 ### Option A — Trusted Publishing / OIDC (preferred, no long-lived token)
 
 No `NPM_TOKEN`. GitHub Actions proves identity via OIDC (`id-token: write` is
-already in `release.yml`). Requires **npm ≥ 11.5.1** (workflow upgrades npm)
-and must **not** export an empty `NODE_AUTH_TOKEN` (that breaks OIDC).
+already in `release.yml`). Requires **npm ≥ 11.5.1** (the workflow upgrades
+npm) and must **not** export an empty `NODE_AUTH_TOKEN` (that breaks OIDC).
 
 1. Sign in at [npmjs.com](https://www.npmjs.com).
-2. Open `https://www.npmjs.com/package/pi-schedule` → **Settings → Trusted Publisher**
-   → Add GitHub Actions:
+2. Open `https://www.npmjs.com/package/pi-schedule` → **Settings → Trusted
+   Publisher** → Add GitHub Actions:
    - **Organization or user:** `pungggi`
    - **Repository:** `pi-schedule`
    - **Workflow filename:** `release.yml` (exact name, no path)
@@ -57,18 +57,18 @@ and must **not** export an empty `NODE_AUTH_TOKEN` (that breaks OIDC).
    ```bash
    gh secret delete NPM_TOKEN --repo pungggi/pi-schedule
    ```
-4. Re-run the release job (see §5).
+4. Re-run the release job (see §4).
 
 Docs: https://docs.npmjs.com/trusted-publishers
 
-### Option B — Classic **Automation** token (works for first publish)
+### Option B — Classic **Automation** token (fallback if OIDC ever breaks)
 
 `EOTP` means the token still requires an authenticator code. CI cannot type OTP.
 
 1. npmjs.com → avatar → **Access Tokens** → **Generate New Token**.
-2. Choose **Classic token → Automation**  
-   - **Not** “Publish”  
-   - **Not** “Read-only”  
+2. Choose **Classic token → Automation**
+   - **Not** "Publish"
+   - **Not** "Read-only"
    - Automation exists specifically to **bypass 2FA on publish** in CI.
 3. Copy `npm_…` (shown once).
 4. Set the GitHub secret (replaces any previous value):
@@ -77,42 +77,18 @@ Docs: https://docs.npmjs.com/trusted-publishers
    # paste token, Enter
    gh secret list --repo pungggi/pi-schedule
    ```
-5. Re-run the release job (see §5).
+5. Re-run the release job (see §4).
 
 > Granular tokens often still surface **EOTP** when account 2FA is
-> “authorization and writes”. If you see EOTP twice, stop using Granular for CI
+> "authorization and writes". If you see EOTP twice, stop using Granular for CI
 > and switch to **Classic Automation** or Trusted Publishing.
 
 ---
 
-## 3. Why `v0.3.0` failed (attempt 1 and 2)
-
-```text
-npm error code EOTP
-npm error This operation requires a one-time password from your authenticator.
-```
-
-| What worked | What failed |
-|-------------|-------------|
-| checkout, npm ci, typecheck, test | `npm publish` package write |
-| version tag sync | — |
-| provenance / sigstore signing | auth for the tarball upload |
-
-So the workflow and package are fine. **`NPM_TOKEN` is not an Automation-class
-credential** (or Trusted Publisher is not configured and a non-Automation token
-is still set).
-
-Re-running the job **without** replacing the secret will fail the same way.
-
----
-
-## 4. Publish a release (each time)
+## 3. Publish a release (each time)
 
 Keep `package.json` version and the git tag in sync (`release.yml` enforces it).
 
-**First release (tag already exists as `v0.3.0`):** fix auth (§2), then §5 re-run.
-
-**Later releases:**
 ```bash
 npm version patch -m "release: %s"   # or minor / major
 git push origin master --follow-tags
@@ -121,20 +97,21 @@ gh run watch
 
 ---
 
-## 5. Re-run a failed tag release (do not retag)
+## 4. Re-run a failed tag release (do not retag)
 
 ```bash
 gh run list --workflow=release.yml --limit 5
 gh run rerun <run-id> --failed
 gh run watch <run-id>
-npm view pi-schedule version          # expect 0.3.0 when green
+npm view pi-schedule version          # expect the new version when green
 ```
 
-Do **not** delete/recreate `v0.3.0` unless you must move the tag (discouraged).
+Do **not** delete/recreate a tag for a version that already landed on npm —
+bump instead. Move a tag only if that version never published.
 
 ---
 
-## 6. Verify a release
+## 5. Verify a release
 
 ```bash
 npm view pi-schedule
@@ -148,7 +125,7 @@ Install: `pi install npm:pi-schedule`
 
 ---
 
-## 7. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -157,13 +134,12 @@ Install: `pi install npm:pi-schedule`
 | `ENEEDAUTH` / 403 | No token and no trusted publisher. Configure §2 A or B. |
 | `version drift: tag != package.json` | `npm version <X> -m 'release: %s'` then push tags. |
 | Provenance `ENOTSUPPORTED` | Needs GHA + `id-token: write` (already set) + public repo. |
-| Name taken by someone else | Rename to scoped `@pungitore/pi-schedule`. |
 | Token expired | Regenerate Automation token; `gh secret set NPM_TOKEN`. |
 | Local emergency publish | `CI=1 npm publish --access public --provenance` after `npm login` (interactive OTP OK). Prefer CI. |
 
 ---
 
-## 8. Why not only manual `npm publish`?
+## 7. Why not only manual `npm publish`?
 
 Manual publish skips the CI test gate, can desync tags, and needs laptop OTP.
 Tag → `release.yml` keeps tests, version sync, and provenance. Keep
