@@ -172,12 +172,7 @@ jobId: …
 
 ## Reliability
 
-Deep dive: **[docs/RELIABILITY.md](docs/RELIABILITY.md)**
-
-Forward-looking design notes:
-
-- **[docs/RELIABILITY.md](docs/RELIABILITY.md)** — failure modes & mitigations
-- **[docs/FUTURE-per-job-models.md](docs/FUTURE-per-job-models.md)** — per-job model selection spike (upstream-blocked on pi)
+Deep dive: **[docs/RELIABILITY.md](docs/RELIABILITY.md)**.
 
 Summary of MVP mitigations:
 
