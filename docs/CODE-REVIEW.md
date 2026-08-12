@@ -4,7 +4,7 @@ A deep, theme-grouped review of the `pi-schedule` codebase (`src/` 13 files /
 ~3,037 lines, `test/` 13 files / ~2,800 lines, plus docs, CI, README/SKILL).
 
 **Health check:** `tsc --noEmit` ✅ · `vitest run` → 173/173 ✅ (162 at
-review time; +4 DST, +1 fresh-lock regression, +6 P2) · `npm pack` guard
+review time; +4 DST, +1 fresh-lock, +6 P2, net 0 P3) · `npm pack` guard
 enforced in CI ✅
 
 Overall this is a **well-engineered, reliability-focused** package. The
@@ -17,7 +17,7 @@ refinements, not fundamental flaws.
 
 ## Status tracker
 
-Updated as findings are addressed on branch `fix/p1-store-lock-and-dst-tests`.
+All findings resolved. P1–P3 merged to `master` via #3, #4, #5.
 
 | Pri | Finding | Location | Status |
 |-----|---------|----------|--------|
@@ -28,12 +28,13 @@ Updated as findings are addressed on branch `fix/p1-store-lock-and-dst-tests`.
 | 🟡 P2 | Spin-wait blocks event loop up to 500 ms | `store.ts:247` | ✅ done |
 | 🟡 P2 | Privilege stack couples to host's 1-settle-per-turn invariant (no defensive cap/TTL) | `privilege.ts:101` | ✅ done |
 | 🟡 P2 | Cross-session RMW merge + run_now/tick serialization + ledger eviction untested | `test/` | ✅ done |
-| 🟢 P3 | `"busy"` RunStatus declared but never written | `types.ts:86` / `runner.ts:486` | ⬜ open |
-| 🟢 P3 | `markRan` deprecated-and-only-tested; dead `LOCK_STALE_MS`+`void` | `store.ts:405,253` | ✅ `LOCK_STALE_MS` fixed via P1; `markRan` ⬜ open |
-| 🟢 P3 | Global shell job cwd is implicit/session-dependent | `runner.ts:367` | ⬜ open |
-| 🟢 P3 | `runs.jsonl` never rotated; doc-only mitigation | `ledger.ts` / docs | ⬜ open |
-| 🟢 P3 | `.pi/` gitignored vs "project scope" shareability expectation | `.gitignore` / README | ⬜ open |
-| 🏠 | Delete local `bash.exe.stackdump` (untracked clutter) | repo root | ⬜ open |
+| 🟢 P3 | `"busy"` RunStatus declared but never written | `types.ts:86` / `runner.ts:486` | ✅ done (removed) |
+| 🟢 P3 | `markRan` deprecated-and-only-tested; dead `LOCK_STALE_MS`+`void` | `store.ts:405,253` | ✅ done |
+| 🟢 P3 | Global shell job cwd is implicit/session-dependent | `runner.ts:367` | ✅ done (documented) |
+| 🟢 P3 | `runs.jsonl` never rotated; doc-only mitigation | `ledger.ts` / docs | ✅ done (doc clarified) |
+| 🟢 P3 | `.pi/` gitignored vs "project scope" shareability expectation | `.gitignore` / README | ✅ done (doc clarified) |
+| 🟢 P3 | `formatRelative` hours/days boundary jump (47.5h → "2d") | `schedule.ts` | ✅ done (fixed + test) |
+| 🏠 | Delete local `bash.exe.stackdump` (untracked clutter) | repo root | ✅ done |
 
 Legend: ⬜ open · 🔄 in progress · ✅ done · ⏭ deferred
 
@@ -192,10 +193,10 @@ age out a `delivered` record (defense-in-depth only — the primary
 ### 🟡 Dead / leftover code
 - `store.ts` `LOCK_STALE_MS` + `void LOCK_STALE_MS;` — ✅ resolved by P1 fix (the
   constant is now genuinely used as the mtime staleness threshold).
-- `store.ts` `markRan` — `@deprecated`, used only by tests. Drop it (and its
-  test) or commit to it. ⬜ still open.
+- `store.ts` `markRan` — `@deprecated`, used only by tests. ✅ dropped (P3,
+  along with its test).
 - `bash.exe.stackdump` (repo root) — local crash artifact, untracked but
-  cluttering the working tree. `rm` it.
+  cluttering the working tree. ✅ deleted (P3).
 
 ### 🟡 Minor inconsistencies
 - `formatRelative` boundary hiccup: `Math.round(47.6h)` → 48 → falls through to
@@ -299,3 +300,11 @@ but these are effectively per-machine. Document explicitly or un-ignore
   `MAX_DEPTH=16` + documents the host invariant. New tests: ledger eviction,
   privilege cap, message fallback, run_now serialization, privilege↔runner e2e,
   cross-session RMW. Suite 167 → 173, typecheck clean.
+- **2026-08-11** — ✅ P3 done (branch `chore/p3-review-polish`, #5). Removed
+  dead code (`"busy"` RunStatus, `markRan`); fixed the `formatRelative` hours/days
+  boundary jump (47.5h → "2d") with a regression test; documented global shell
+  cwd, project-scope machine-locality, and `runs.jsonl` head-truncation safety
+  in `RELIABILITY.md`; deleted the local `bash.exe.stackdump`. Suite net 0
+  (-1 markRan test, +1 boundary test), typecheck clean.
+- **2026-08-12** — Consolidation: all P1–P3 findings resolved and merged to
+  `master` (#3, #4, #5). Status tracker fully green; suite 173, typecheck clean.
