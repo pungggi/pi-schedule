@@ -180,4 +180,14 @@ describe("PrivilegeGuard tier enforcement", () => {
     expect(guard.depth()).toBe(0);
     expect(await call("bash")).toBeUndefined();
   });
+
+  it("enter() caps stack growth (host-invariant safety valve)", () => {
+    // If settles ever stop keeping up with enters (double/no settle on a future
+    // pi build), the stack must not grow unbounded and pin read_only forever.
+    const { guard } = setup();
+    for (let i = 0; i < 30; i++) guard.enter("read_only");
+    expect(guard.depth()).toBe(16); // MAX_DEPTH
+    // Still functional: a bash call is blocked under the capped read_only stack.
+    // (covered implicitly by the tier tests; depth is the contract here.)
+  });
 });

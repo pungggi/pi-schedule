@@ -98,18 +98,33 @@ export class PrivilegeGuard {
     });
 
     pi.on("agent_settled", async () => {
-      // One settled turn completes one scheduled delivery (or user turn).
-      // Pop at most one so stacked follow-ups still enforce.
+      // Host invariant: pi fires exactly one `agent_settled` per agent turn
+      // (scheduled fire OR interactive user turn), one turn at a time. So one
+      // settle pops at most one scheduled tier. If the invariant ever breaks
+      // (double/no settle on a future pi build), enter() caps growth at
+      // MAX_DEPTH as a safety valve.
       if (this.stack.length > 0) this.stack.pop();
     });
   }
 
+  /**
+   * Defensive ceiling. The stack should mirror in-flight scheduled turns
+   * (depth > 1 only for stacked follow-ups). If it grows past this, the host
+   * invariant — exactly one `agent_settled` per fired turn — is not holding
+   * (settles not firing, or firing without a matching enter). Trim oldest-first
+   * so a leaked read_only/suggest can't pin privilege indefinitely.
+   */
+  private static readonly MAX_DEPTH = 16;
+
   /** Call after successfully injecting a scheduled prompt. */
   enter(tier: PrivilegeTier): void {
+    while (this.stack.length >= PrivilegeGuard.MAX_DEPTH) {
+      this.stack.shift();
+    }
     this.stack.push(tier);
   }
 
-  /** Test helper / emergency clear. */
+  /** Test hook / emergency clear. */
   clear(): void {
     this.stack = [];
   }

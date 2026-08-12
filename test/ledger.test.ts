@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunLedger, buildRun } from "../src/ledger.js";
+import { MAX_HISTORY, RunLedger, buildRun } from "../src/ledger.js";
 
 const temps: string[] = [];
 
@@ -106,5 +106,38 @@ describe("RunLedger robustness", () => {
     temps.push(dir);
     const ledger = new RunLedger(dir); // dir itself → readFileSync throws EISDIR
     expect(ledger.history({})).toEqual([]);
+  });
+});
+
+describe("RunLedger — eviction window", () => {
+  const base = {
+    jobId: "j1",
+    jobName: "n",
+    scope: "global" as const,
+    source: "session_start" as const,
+    startedAt: "2025-01-01T00:00:00.000Z",
+    endedAt: "2025-01-01T00:00:01.000Z",
+    tier: "read_only" as const,
+    missedWindow: "catch_up_one" as const,
+  };
+
+  it("wasDelivered only sees the last MAX_HISTORY entries (aging out)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-"));
+    temps.push(dir);
+    const ledger = new RunLedger(join(dir, "runs.jsonl"));
+
+    // An early delivered record that should age out of the retained window.
+    ledger.append(
+      buildRun({ ...base, idempotencyKey: "early", status: "delivered" }),
+    );
+    // Fill past the window so "early" is evicted from the in-memory tail.
+    for (let i = 0; i < MAX_HISTORY; i++) {
+      ledger.append(
+        buildRun({ ...base, idempotencyKey: `k${i}`, status: "delivered" }),
+      );
+    }
+
+    expect(ledger.wasDelivered("early")).toBe(false); // aged out
+    expect(ledger.wasDelivered(`k${MAX_HISTORY - 1}`)).toBe(true); // still in window
   });
 });

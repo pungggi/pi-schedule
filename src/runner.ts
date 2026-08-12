@@ -312,15 +312,22 @@ export class ScheduleRunner {
 
     if (action === "message") {
       const body = job.prompt.trim() || job.name;
-      this.opts.pi.sendMessage(
-        {
-          customType: "pi-schedule",
-          content: body,
-          display: true,
-          details: { jobId: job.id, action: "message", runId: opts.runId },
-        },
-        { triggerTurn: false },
-      );
+      if (this.opts.pi.sendMessage) {
+        this.opts.pi.sendMessage(
+          {
+            customType: "pi-schedule",
+            content: body,
+            display: true,
+            details: { jobId: job.id, action: "message", runId: opts.runId },
+          },
+          { triggerTurn: false },
+        );
+      } else {
+        // No custom-message channel on this pi build — surface to the console
+        // so the message is still delivered somewhere rather than throwing
+        // (notify/shell already treat sendMessage as optional via `?.`).
+        console.log(notifyLabel(job));
+      }
       return { detail: "message", wokeAgent: false };
     }
 
@@ -574,10 +581,16 @@ export class ScheduleRunner {
       } else {
         console.error(`[pi-schedule] failed to fire "${job.name}": ${message}`);
       }
-      // Advance on error so we don't hot-loop a broken delivery path.
-      const updated = this.opts.store.markAttempt(job, at, "error", {
+      // Advance on error so we don't hot-loop a broken delivery path. Re-read
+      // the freshest job inside the lock so a tier/schedule/action change made
+      // between the candidate-read and the fire is reflected in both the
+      // advance and the forensic ledger (the success path already uses
+      // `fresh`).
+      const errorSubject = this.opts.store.get(job.id, this.cwd) ?? job;
+      const errorKey = opts.forced ? key : idempotencyKeyFor(errorSubject);
+      const updated = this.opts.store.markAttempt(errorSubject, at, "error", {
         error: message,
-        idempotencyKey: key,
+        idempotencyKey: errorKey,
       });
       const term = terminalReason(updated, updated.runCount);
       const finalJob = term
@@ -585,19 +598,19 @@ export class ScheduleRunner {
         : updated;
       this.recordBestEffort({
         runId,
-        jobId: job.id,
-        jobName: job.name,
-        scope: job.scope,
-        projectPath: job.projectPath,
-        idempotencyKey: key,
+        jobId: errorSubject.id,
+        jobName: errorSubject.name,
+        scope: errorSubject.scope,
+        projectPath: errorSubject.projectPath,
+        idempotencyKey: errorKey,
         source: opts.source,
         status: "error",
         startedAt,
         endedAt: this.now().toISOString(),
         detail: message + (term ? ` terminated:${term}` : ""),
-        tier,
-        missedWindow,
-        action,
+        tier: errorSubject.tier ?? tier,
+        missedWindow: errorSubject.missedWindow ?? missedWindow,
+        action: errorSubject.action ?? action,
       });
       return finalJob;
     } finally {

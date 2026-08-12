@@ -211,11 +211,33 @@ function isLockStale(lockPath: string, now: number = Date.now()): boolean {
   }
 }
 
-/** Synchronous bounded backoff between lock retries (see docs/CODE-REVIEW.md P2). */
+/**
+ * SharedArrayBuffer-backed buffer for {@link backoff}. Allocated once; null if
+ * the runtime does not expose SharedArrayBuffer (then we fall back to a spin).
+ */
+const BACKOFF_BUF: Int32Array | null = (() => {
+  try {
+    return new Int32Array(new SharedArrayBuffer(4));
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * Synchronous bounded backoff between lock retries.
+ *
+ * Uses `Atomics.wait` on a SharedArrayBuffer-backed Int32Array — a true
+ * blocking sleep with no CPU spin, and allowed on Node's main thread (unlike
+ * browsers). Falls back to a tight spin if SharedArrayBuffer is unavailable.
+ */
 function backoff(ms: number): void {
+  if (BACKOFF_BUF) {
+    Atomics.wait(BACKOFF_BUF, 0, 0, ms);
+    return;
+  }
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    /* spin */
+    /* spin fallback */
   }
 }
 
