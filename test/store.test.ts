@@ -196,25 +196,6 @@ describe("ScheduleStore", () => {
     expect(ids).toEqual([g.id, p.id].sort());
   });
 
-  it("markRan advances nextRunAt and counters", () => {
-    const { store } = tempStore();
-    const job = store.create({
-      name: "x",
-      prompt: "X",
-      schedule: parseSchedule("every 1h"),
-      scope: "global",
-      now: new Date("2025-01-01T00:00:00.000Z"),
-    });
-
-    const ran = store.markRan(job, new Date("2025-01-01T00:00:00.000Z"), "ok");
-    expect(ran.runCount).toBe(1);
-    expect(ran.lastStatus).toBe("ok");
-    expect(ran.lastRunAt).toBe("2025-01-01T00:00:00.000Z");
-    expect(ran.nextRunAt).toBe("2025-01-01T01:00:00.000Z");
-    expect(ran.tier).toBe("read_only");
-    expect(ran.missedWindow).toBe("catch_up_one");
-  });
-
   it("create stores tier and missedWindow", () => {
     const { store, project } = tempStore();
     const job = store.create({

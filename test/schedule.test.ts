@@ -195,6 +195,17 @@ describe("formatRelative", () => {
     expect(formatRelative("2025-01-03T12:00:00.000Z", now)).toBe("in 2d");
     expect(formatRelative("2024-12-30T12:00:00.000Z", now)).toBe("2d ago");
   });
+
+  it("hours/days boundary does not jump (47.5h → 48h, not 2d)", () => {
+    // Regression: round(47.5h)=48 used to trip the <48 check and show "2d"
+    // while 47.4h showed "47h". The threshold is now keyed on raw abs.
+    const almost48h = new Date(now.getTime() + 47.5 * 3_600_000).toISOString();
+    expect(formatRelative(almost48h, now)).toBe("in 48h");
+    const justUnder48 = new Date(now.getTime() + 47.4 * 3_600_000).toISOString();
+    expect(formatRelative(justUnder48, now)).toBe("in 47h");
+    const at48h = new Date(now.getTime() + 48 * 3_600_000).toISOString();
+    expect(formatRelative(at48h, now)).toBe("in 2d");
+  });
 });
 
 // DST edge cases for the daily wall-clock path (localWallClock is private, so

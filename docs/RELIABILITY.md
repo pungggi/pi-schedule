@@ -85,7 +85,7 @@ prompts.
   - file lock via O_EXCL (`wx`); stale takeover via **rename** (not unlink) so one racer wins
   - release is token-scoped
 - Store upserts take a per-file lock and re-read before write (cross-session RMW)
-- `busy` / transient `locked` do **not** flood the ledger
+- transient `locked` does **not** flood the ledger
 - Ledger `append` never throws; store advances **before** ledger write
 
 ### 5. Fail-plausible / polluted context
@@ -116,7 +116,7 @@ errors into fluent false digests; ~70% of silent failures found by humans.
   "jobName": "…",
   "idempotencyKey": "jobId:nextRunAt",
   "source": "session_start|tick|run_now",
-  "status": "delivered|error|skipped|locked|busy",
+  "status": "delivered|error|skipped|locked",
   "startedAt": "…",
   "endedAt": "…",
   "detail": "optional reason / shell exit summary",
@@ -205,10 +205,11 @@ complex modules; governance is a regression engine, not a predictor.
 |--------|----------|
 | Daily schedule timezone | **Local** wall clock (`setHours`); DST shift days can be off by ~1h (daily grace covers skip within 1h) |
 | Interval anchoring | Reschedule from **now** after fire → load-anchored, not fixed wall-clock phase; drift accumulates |
-| `runs.jsonl` growth | Append-only, **no rotation** in MVP; operators may truncate |
+| `runs.jsonl` growth | Append-only, **no rotation** in MVP. Operators may truncate the **head** (keep the tail — `wasDelivered` only scans the last 200 lines, so a head-truncate is safe and preserves recent idempotency) |
 | Idempotency scan window | Last **200** JSONL lines only; heavy backlog can age out a `delivered` record |
-| Project root | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root |
+| Project root / scope | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root. Note: `.pi/` is gitignored, so **project-scoped jobs are machine-local**, not team-shared via git (treat "project" as "namespaced to this directory on this machine") |
 | File locks | Best-effort single-host; not a multi-machine consensus lock |
+| Global shell `cwd` | A global shell job has no `projectPath`, so it runs in the session `cwd` — a relative command is session-dependent. Use a project-scoped job or an absolute command for a deterministic cwd |
 
 ## Storage layout
 
@@ -261,7 +262,6 @@ schedule action=run_now id=…   # reports actual status, never invents success
 | `error` | Delivery failed |
 | `skipped` | Policy or idempotency |
 | `locked` | Lock contention |
-| `busy` | Wave fire-cap (job remains due) |
 
 ## References (selected)
 

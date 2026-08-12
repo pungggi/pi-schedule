@@ -471,16 +471,6 @@ export class ScheduleStore {
     return updated;
   }
 
-  /** @deprecated prefer markAttempt */
-  markRan(
-    job: ScheduledJob,
-    at: Date,
-    status: NonNullable<JobStatus>,
-    error?: string,
-  ): ScheduledJob {
-    return this.markAttempt(job, at, status, { error });
-  }
-
   setEnabled(id: string, cwd: string, enabled: boolean): ScheduledJob | undefined {
     const job = this.get(id, cwd);
     if (!job) return undefined;
