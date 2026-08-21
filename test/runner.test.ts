@@ -45,6 +45,7 @@ interface HarnessOpts {
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
   execThrows?: boolean;
   compactionWaitMs?: number;
+  compactionProbeMs?: number;
 }
 
 function makeHarness(opts: HarnessOpts = {}) {
@@ -62,6 +63,7 @@ function makeHarness(opts: HarnessOpts = {}) {
   let clock = new Date(T0);
   let idle = opts.idle ?? true;
   let compactionBusyLeft = opts.sendCompactionBusyTimes ?? 0;
+  let compactionBusy = false; // toggled via setBusy (simulates live compaction)
   const sent: { content: string; deliverAs?: string }[] = [];
   const customMessages: Array<{ content: string; triggerTurn?: boolean }> = [];
   const notifies: string[] = [];
@@ -79,8 +81,8 @@ function makeHarness(opts: HarnessOpts = {}) {
       o?: { deliverAs?: "steer" | "followUp" },
     ): void {
       if (opts.sendThrows) throw new Error("boom");
-      if (compactionBusyLeft > 0) {
-        compactionBusyLeft -= 1;
+      if (compactionBusy || compactionBusyLeft > 0) {
+        compactionBusyLeft = Math.max(0, compactionBusyLeft - 1);
         throw new Error(
           "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
         );
@@ -138,6 +140,7 @@ function makeHarness(opts: HarnessOpts = {}) {
     tickMs: 1_000,
     compactionWaitMs: opts.compactionWaitMs ?? 5_000,
     compactionPollMs: 5,
+    compactionProbeMs: opts.compactionProbeMs ?? 250,
   });
 
   const createGlobal = (
@@ -178,6 +181,9 @@ function makeHarness(opts: HarnessOpts = {}) {
     forceDue: (id: string, when = T0) => {
       const j = store.get(id, project);
       if (j) store.upsert({ ...j, nextRunAt: when });
+    },
+    setBusy: (b: boolean) => {
+      compactionBusy = b;
     },
     emit: async (event: string, e?: unknown) => {
       for (const h of handlers[event] ?? []) await h(e, ctx);
@@ -806,6 +812,7 @@ describe("ScheduleRunner — compaction busy-wait", () => {
     const job = h.createGlobal();
     h.forceDue(job.id);
     h.runner.attach();
+    h.setBusy(true); // pi rejects submission while compaction runs
 
     await h.emit("session_before_compact", {
       type: "session_before_compact",
@@ -815,9 +822,69 @@ describe("ScheduleRunner — compaction busy-wait", () => {
     await new Promise((r) => setTimeout(r, 20)); // wave is now parked in the wait loop
     expect(h.sent).toHaveLength(0);
 
+    // Compaction ends: pi accepts again AND the end event flips the flag.
+    h.setBusy(false);
     await h.emit("session_compact", { type: "session_compact" });
     await wave;
 
+    expect(h.sent).toHaveLength(1);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok");
+  });
+
+  it("probe lands immediately when a flagged compaction was already cancelled", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    h.runner.attach();
+
+    // before_compact fired, compaction got cancelled: no session_compact will
+    // ever follow, but pi accepts prompt submission again right away.
+    await h.emit("session_before_compact", {
+      type: "session_before_compact",
+    });
+
+    const started = Date.now();
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    // The first send attempt is the probe: it lands despite the stale flag —
+    // no parking for the probe interval or the wait budget.
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(h.sent).toHaveLength(1);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok");
+  });
+
+  it("probes periodically while the flag never clears (no end event)", async () => {
+    const h = makeHarness({ compactionWaitMs: 400, compactionProbeMs: 100 });
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    h.runner.attach();
+
+    let attempts = 0;
+    const origSend = h.pi.sendUserMessage.bind(h.pi);
+    (h.pi as { sendUserMessage: unknown }).sendUserMessage = (
+      content: string,
+      o?: { deliverAs?: "steer" | "followUp" },
+    ) => {
+      attempts += 1;
+      if (attempts >= 3) {
+        // Flag still set (end event never fired), but compaction finished:
+        // the probe discovers it.
+        h.setBusy(false);
+      }
+      return origSend(content, o);
+    };
+
+    await h.emit("session_before_compact", { type: "session_before_compact" });
+    h.setBusy(true);
+
+    const started = Date.now();
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    // Attempts: 1 (immediate) + parked probes at ~100ms cadence → ≥3 attempts.
+    expect(attempts).toBeGreaterThanOrEqual(3);
+    expect(Date.now() - started).toBeLessThan(2_000); // far under the 400ms budget? no — under budget+slack
     expect(h.sent).toHaveLength(1);
     const after = h.store.get(job.id, h.project)!;
     expect(after.lastStatus).toBe("ok");

@@ -207,19 +207,23 @@ scheduled wake lands in exactly that window when a long shell poll finishes
 into a session whose context is being compacted — the delivery crashes into
 the extension runtime instead of the task reaching the agent.
 
-**Mitigation — bounded busy-wait in `runner.ts` (`sendAgentMessage`):**
+**Mitigation — probe-send with event-paced parking (`runner.ts` `sendAgentMessage`):**
 
-- The runner tracks `session_before_compact` / `session_compact` events and
-  parks delivery (500ms poll) while compaction is flagged, skipping doomed
-  first attempts.
-- The thrown compaction error is the authoritative backstop (missed-event
-  race): the send is retried on a fixed cadence until it lands.
-- The wait is bounded by `compactionWaitMs` (default **120s**, ~longest sane
-  compaction). A stuck or cancelled compaction degrades to the normal
-  delivery-error path — job marked `error`, `nextRunAt` advanced (no hot-loop),
-  ledger row — never a hung wave.
-- `session_start` / `session_shutdown` reset the flag so a stale hint cannot
-  park later sessions; a successful send also clears it.
+- The send attempt itself is the probe: pi raises the compaction rejection at
+  the top of `prompt()` (before input events, expansion, or enqueue), so a
+  doomed attempt is side-effect-free and always attempted first — this covers
+  a stale flag (compaction ended or was cancelled without an end event).
+- While the throw says compaction is running, the runner parks on the
+  `session_before_compact` / `session_compact` flag (500ms poll) and retries
+  within one tick of the end event.
+- Every **5s** (`compactionProbeMs`) the send is retried even while the flag
+  is still set: a **cancelled** compaction never emits `session_compact`, so
+  only a probe can discover it — bounded to one probe interval of delay.
+- The whole wait is bounded by `compactionWaitMs` (default **120s**): a stuck
+  compaction degrades to the normal delivery-error path — job marked `error`,
+  `nextRunAt` advanced (no hot-loop), ledger row — never a hung wave.
+- `session_start` / `session_shutdown` reset the flag; a successful send also
+  clears it.
 
 ## Undocumented-but-important choices (now documented)
 
@@ -232,7 +236,7 @@ the extension runtime instead of the task reaching the agent.
 | Project root / scope | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root. Note: `.pi/` is gitignored, so **project-scoped jobs are machine-local**, not team-shared via git (treat "project" as "namespaced to this directory on this machine") |
 | File locks | Best-effort single-host; not a multi-machine consensus lock |
 | Global shell `cwd` | A global shell job has no `projectPath`, so it runs in the session `cwd` — a relative command is session-dependent. Use a project-scoped job or an absolute command for a deterministic cwd |
-| Compaction collision | Prompt delivery during context compaction waits up to **120s** (`compactionWaitMs` in the runner), then fails via the normal error path — the task is never silently dropped, but a compaction longer than 120s loses that slot to the next schedule |
+| Compaction collision | Prompt delivery during context compaction retries: send-probe immediately, then event-paced parking (500ms poll) with a probe send every 5s; after **120s** (`compactionWaitMs`) it fails via the normal error path — the task is never silently dropped, and even a cancelled compaction (no end event) costs at most one probe interval |
 
 ## Storage layout
 
