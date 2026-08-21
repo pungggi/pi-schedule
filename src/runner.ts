@@ -53,6 +53,8 @@ export const TICK_MS = 30_000;
 
 /** Poll interval while waiting for context compaction to finish. */
 export const COMPACTION_POLL_MS = 500;
+/** While parked on the compaction flag, probe with a real send this often. */
+export const COMPACTION_PROBE_MS = 5_000;
 /** Max time a delivery waits for compaction before falling back to the error path. */
 export const COMPACTION_WAIT_MAX_MS = 120_000;
 
@@ -118,6 +120,8 @@ export interface RunnerOptions {
   compactionWaitMs?: number;
   /** Poll interval for the compaction wait (default {@link COMPACTION_POLL_MS}). */
   compactionPollMs?: number;
+  /** Send-probe cadence while parked on the compaction flag (default {@link COMPACTION_PROBE_MS}). */
+  compactionProbeMs?: number;
 }
 
 export class ScheduleRunner {
@@ -135,6 +139,7 @@ export class ScheduleRunner {
   private readonly tickMs: number;
   private readonly compactionWaitMs: number;
   private readonly compactionPollMs: number;
+  private readonly compactionProbeMs: number;
   private readonly ledger: RunLedger;
   private readonly locks: JobLockManager;
   private readonly privilege: PrivilegeGuard;
@@ -145,6 +150,7 @@ export class ScheduleRunner {
     this.tickMs = opts.tickMs ?? TICK_MS;
     this.compactionWaitMs = opts.compactionWaitMs ?? COMPACTION_WAIT_MAX_MS;
     this.compactionPollMs = opts.compactionPollMs ?? COMPACTION_POLL_MS;
+    this.compactionProbeMs = opts.compactionProbeMs ?? COMPACTION_PROBE_MS;
 
     const paths = opts.store.pathsInfo();
     this.ledger = opts.ledger ?? new RunLedger(paths.runsFile);
@@ -330,12 +336,20 @@ export class ScheduleRunner {
    * Submit the agent message, waiting out in-flight context compaction.
    *
    * pi rejects prompt submission while compaction runs, and a scheduled wake
-   * can easily land in that window (long shell poll + full context). Park
-   * while the session events say compaction is running; if a send still
-   * lands inside the window (missed-event race), the thrown error is the
-   * authoritative signal and drives a fixed retry cadence. Bounded by
-   * compactionWaitMs so a stuck or cancelled compaction degrades to the
-   * normal delivery-error path (advance + ledger) instead of hanging a wave.
+   * can easily land in that window (long shell poll + full context). The
+   * send attempt itself is the probe — the throw is raised at the top of
+   * pi's prompt(), before events/expansion/enqueue, so a doomed attempt is
+   * side-effect-free — and the session-event flag only paces retries:
+   *
+   * - attempt immediately (covers a stale flag: compaction already ended or
+   *   was cancelled without a session_compact event);
+   * - while the throw says compaction is running, sleep a poll tick and
+   *   retry as soon as session_compact flips the flag (≤ one poll tick);
+   * - every compactionProbeMs, retry the send even while the flag is still
+   *   set: a CANCELLED compaction never emits session_compact, so only a
+   *   probe can discover it (≤ one probe interval of delay);
+   * - bounded by compactionWaitMs so a stuck compaction degrades to the
+   *   normal delivery-error path (advance + ledger), never a hung wave.
    */
   private async sendAgentMessage(
     body: string,
@@ -343,11 +357,6 @@ export class ScheduleRunner {
     deliverAs?: "followUp" | "steer",
   ): Promise<void> {
     const deadline = Date.now() + this.compactionWaitMs;
-
-    // Event hint: skip doomed first attempts while compaction is flagged.
-    while (this.compacting && Date.now() < deadline) {
-      await this.sleep(this.compactionPollMs);
-    }
 
     for (;;) {
       try {
@@ -357,9 +366,17 @@ export class ScheduleRunner {
       } catch (err) {
         if (!isCompactionBusyError(err)) throw err;
         if (Date.now() >= deadline) throw err;
-        // pi is still compacting — this throw is authoritative even when the
-        // event flag is stale, so retry the send on a fixed cadence.
-        await this.sleep(this.compactionPollMs);
+
+        // Authoritative: pi is compacting. Park on the event flag for quick
+        // resume, but cap the park at the probe cadence / deadline so a
+        // probe send happens even if session_compact never fires.
+        const parkUntil = Math.min(
+          Date.now() + this.compactionProbeMs,
+          deadline,
+        );
+        do {
+          await this.sleep(this.compactionPollMs);
+        } while (this.compacting && Date.now() < parkUntil);
       }
     }
   }
