@@ -18,7 +18,11 @@ import type {
 import { RunLedger } from "../src/ledger.js";
 import { JobLockManager } from "../src/lock.js";
 import { PrivilegeGuard } from "../src/privilege.js";
-import { ScheduleRunner, resolveShell } from "../src/runner.js";
+import {
+  ScheduleRunner,
+  isCompactionBusyError,
+  resolveShell,
+} from "../src/runner.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { PrivilegeTier, ScheduledJob } from "../src/types.js";
@@ -33,11 +37,14 @@ afterEach(() => {
 interface HarnessOpts {
   idle?: boolean;
   sendThrows?: boolean;
+  /** First N sendUserMessage calls throw pi's compaction-busy error. */
+  sendCompactionBusyTimes?: number;
   hasInitialPrompt?: boolean;
   hasUI?: boolean;
   noSendMessage?: boolean;
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
   execThrows?: boolean;
+  compactionWaitMs?: number;
 }
 
 function makeHarness(opts: HarnessOpts = {}) {
@@ -54,6 +61,7 @@ function makeHarness(opts: HarnessOpts = {}) {
 
   let clock = new Date(T0);
   let idle = opts.idle ?? true;
+  let compactionBusyLeft = opts.sendCompactionBusyTimes ?? 0;
   const sent: { content: string; deliverAs?: string }[] = [];
   const customMessages: Array<{ content: string; triggerTurn?: boolean }> = [];
   const notifies: string[] = [];
@@ -71,6 +79,12 @@ function makeHarness(opts: HarnessOpts = {}) {
       o?: { deliverAs?: "steer" | "followUp" },
     ): void {
       if (opts.sendThrows) throw new Error("boom");
+      if (compactionBusyLeft > 0) {
+        compactionBusyLeft -= 1;
+        throw new Error(
+          "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+        );
+      }
       sent.push({ content, deliverAs: o?.deliverAs });
     },
     sendMessage: opts.noSendMessage
@@ -122,6 +136,8 @@ function makeHarness(opts: HarnessOpts = {}) {
     hasInitialPrompt: () => opts.hasInitialPrompt === true,
     now: () => clock,
     tickMs: 1_000,
+    compactionWaitMs: opts.compactionWaitMs ?? 5_000,
+    compactionPollMs: 5,
   });
 
   const createGlobal = (
@@ -768,5 +784,114 @@ describe("ScheduleRunner — review P2 follow-ups", () => {
 
     await h.emit("session_shutdown");
     expect(h.privilege.depth()).toBe(0);
+  });
+});
+
+describe("ScheduleRunner — compaction busy-wait", () => {
+  it("isCompactionBusyError matches only pi's compaction rejection", () => {
+    expect(
+      isCompactionBusyError(
+        new Error(
+          "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+        ),
+      ),
+    ).toBe(true);
+    expect(isCompactionBusyError(new Error("boom"))).toBe(false);
+    expect(isCompactionBusyError("not an error")).toBe(false);
+    expect(isCompactionBusyError(undefined)).toBe(false);
+  });
+
+  it("waits out an active compaction flagged by session_before_compact, then delivers", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    h.runner.attach();
+
+    await h.emit("session_before_compact", {
+      type: "session_before_compact",
+    });
+
+    const wave = h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
+    await new Promise((r) => setTimeout(r, 20)); // wave is now parked in the wait loop
+    expect(h.sent).toHaveLength(0);
+
+    await h.emit("session_compact", { type: "session_compact" });
+    await wave;
+
+    expect(h.sent).toHaveLength(1);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok");
+  });
+
+  it("recovers when sendUserMessage throws the compaction error (missed-event race)", async () => {
+    const h = makeHarness({ sendCompactionBusyTimes: 2 });
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(1); // third attempt lands
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok");
+    expect(after.runCount).toBe(1);
+  });
+
+  it("gives up after the wait budget: records error + advances instead of hanging", async () => {
+    const h = makeHarness({
+      sendCompactionBusyTimes: 1_000,
+      compactionWaitMs: 30,
+    });
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+
+    const started = Date.now();
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(Date.now() - started).toBeLessThan(5_000); // bounded, not hung
+    expect(h.sent).toHaveLength(0);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("error");
+    expect(after.lastError).toContain("compaction is in progress");
+    expect(new Date(after.nextRunAt).getTime()).toBeGreaterThan(
+      new Date(T0).getTime(),
+    );
+    expect(
+      h.ledger.history({}).some((r) => r.status === "error"),
+    ).toBe(true);
+  });
+
+  it("non-compaction send failures still fail fast (no retry)", async () => {
+    const h = makeHarness({ sendThrows: true });
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+
+    const started = Date.now();
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(Date.now() - started).toBeLessThan(500);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("error");
+    expect(after.lastError).toBe("boom");
+  });
+
+  it("session_start resets a stale compaction flag (cancelled compaction)", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal();
+    h.forceDue(job.id);
+    h.runner.attach();
+
+    // before_compact fired but no session_compact ever follows (cancelled).
+    await h.emit("session_before_compact", {
+      type: "session_before_compact",
+    });
+
+    // The next session_start clears the stale flag; the wave must not park.
+    const started = Date.now();
+    await h.emit("session_start", { type: "session_start", reason: "new" });
+
+    expect(Date.now() - started).toBeLessThan(1_000); // not parked for the 5s budget
+    expect(h.sent).toHaveLength(1);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok");
   });
 });

@@ -199,6 +199,28 @@ complex modules; governance is a regression engine, not a predictor.
 - Document daemon-ready fields now; keep one representation
 - “Sunset Law”: do not add layers without retiring complexity
 
+### 10. Prompt submission vs. context compaction
+
+**Failure mode:** pi rejects `sendUserMessage` while context compaction is in
+flight ("Cannot submit a prompt while compaction is in progress"). A
+scheduled wake lands in exactly that window when a long shell poll finishes
+into a session whose context is being compacted — the delivery crashes into
+the extension runtime instead of the task reaching the agent.
+
+**Mitigation — bounded busy-wait in `runner.ts` (`sendAgentMessage`):**
+
+- The runner tracks `session_before_compact` / `session_compact` events and
+  parks delivery (500ms poll) while compaction is flagged, skipping doomed
+  first attempts.
+- The thrown compaction error is the authoritative backstop (missed-event
+  race): the send is retried on a fixed cadence until it lands.
+- The wait is bounded by `compactionWaitMs` (default **120s**, ~longest sane
+  compaction). A stuck or cancelled compaction degrades to the normal
+  delivery-error path — job marked `error`, `nextRunAt` advanced (no hot-loop),
+  ledger row — never a hung wave.
+- `session_start` / `session_shutdown` reset the flag so a stale hint cannot
+  park later sessions; a successful send also clears it.
+
 ## Undocumented-but-important choices (now documented)
 
 | Choice | Behavior |
@@ -210,6 +232,7 @@ complex modules; governance is a regression engine, not a predictor.
 | Project root / scope | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root. Note: `.pi/` is gitignored, so **project-scoped jobs are machine-local**, not team-shared via git (treat "project" as "namespaced to this directory on this machine") |
 | File locks | Best-effort single-host; not a multi-machine consensus lock |
 | Global shell `cwd` | A global shell job has no `projectPath`, so it runs in the session `cwd` — a relative command is session-dependent. Use a project-scoped job or an absolute command for a deterministic cwd |
+| Compaction collision | Prompt delivery during context compaction waits up to **120s** (`compactionWaitMs` in the runner), then fails via the normal error path — the task is never silently dropped, but a compaction longer than 120s loses that slot to the next schedule |
 
 ## Storage layout
 
