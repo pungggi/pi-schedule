@@ -51,6 +51,21 @@ import type {
 /** How often the in-session ticker checks for due jobs. */
 export const TICK_MS = 30_000;
 
+/** Poll interval while waiting for context compaction to finish. */
+export const COMPACTION_POLL_MS = 500;
+/** Max time a delivery waits for compaction before falling back to the error path. */
+export const COMPACTION_WAIT_MAX_MS = 120_000;
+
+/**
+ * Recognize pi's prompt-submission rejection raised while context
+ * compaction is in flight:
+ * "Cannot submit a prompt while compaction is in progress. Wait for
+ * compaction to finish and retry."
+ */
+export function isCompactionBusyError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("compaction is in progress");
+}
+
 /**
  * Candidate Git Bash (MSYS) binaries on Windows, in preference order. The bare
  * `"bash"` is ambiguous on Windows: PATH resolution can pick
@@ -99,6 +114,10 @@ export interface RunnerOptions {
   hasInitialPrompt?: () => boolean;
   now?: () => Date;
   tickMs?: number;
+  /** Delivery wait budget for in-flight compaction (default {@link COMPACTION_WAIT_MAX_MS}). */
+  compactionWaitMs?: number;
+  /** Poll interval for the compaction wait (default {@link COMPACTION_POLL_MS}). */
+  compactionPollMs?: number;
 }
 
 export class ScheduleRunner {
@@ -109,9 +128,13 @@ export class ScheduleRunner {
   private waveChain: Promise<unknown> = Promise.resolve();
   private lastErrorNotifyAt = 0;
   private lastErrorNotifyKey = "";
+  /** True between session_before_compact and session_compact (hint only). */
+  private compacting = false;
   private readonly hasInitialPrompt: (() => boolean) | undefined;
   private readonly now: () => Date;
   private readonly tickMs: number;
+  private readonly compactionWaitMs: number;
+  private readonly compactionPollMs: number;
   private readonly ledger: RunLedger;
   private readonly locks: JobLockManager;
   private readonly privilege: PrivilegeGuard;
@@ -120,6 +143,8 @@ export class ScheduleRunner {
     this.hasInitialPrompt = opts.hasInitialPrompt;
     this.now = opts.now ?? (() => new Date());
     this.tickMs = opts.tickMs ?? TICK_MS;
+    this.compactionWaitMs = opts.compactionWaitMs ?? COMPACTION_WAIT_MAX_MS;
+    this.compactionPollMs = opts.compactionPollMs ?? COMPACTION_POLL_MS;
 
     const paths = opts.store.pathsInfo();
     this.ledger = opts.ledger ?? new RunLedger(paths.runsFile);
@@ -135,6 +160,7 @@ export class ScheduleRunner {
     pi.on("session_start", async (event, ctx) => {
       this.cwd = ctx.cwd;
       this.stopTicker();
+      this.compacting = false; // fresh session cannot be mid-compaction
 
       if (FIRE_ON_REASONS.has(event.reason)) {
         if (shouldSkipDueOnSessionStart(event.reason, this.hasInitialPrompt)) {
@@ -147,9 +173,21 @@ export class ScheduleRunner {
       this.startTicker(ctx);
     });
 
+    // Track compaction so scheduled wakes wait it out instead of crashing
+    // into pi's "Cannot submit a prompt while compaction is in progress".
+    // Hint only: the thrown error is the authoritative backstop (race window
+    // before session_before_compact fires, or a missed event).
+    pi.on("session_before_compact", () => {
+      this.compacting = true;
+    });
+    pi.on("session_compact", () => {
+      this.compacting = false;
+    });
+
     pi.on("session_shutdown", () => {
       this.stopTicker();
       this.privilege.clear();
+      this.compacting = false;
     });
   }
 
@@ -268,7 +306,8 @@ export class ScheduleRunner {
     this.ledger.append(buildRun(args));
   }
 
-  private sendAgentMessage(
+  /** One submission attempt — the original synchronous send. */
+  private sendNow(
     body: string,
     ctx: ExtensionContext,
     deliverAs?: "followUp" | "steer",
@@ -279,6 +318,49 @@ export class ScheduleRunner {
       });
     } else {
       this.opts.pi.sendUserMessage(body);
+    }
+  }
+
+  /** Bounded sleep used by the compaction wait loop. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Submit the agent message, waiting out in-flight context compaction.
+   *
+   * pi rejects prompt submission while compaction runs, and a scheduled wake
+   * can easily land in that window (long shell poll + full context). Park
+   * while the session events say compaction is running; if a send still
+   * lands inside the window (missed-event race), the thrown error is the
+   * authoritative signal and drives a fixed retry cadence. Bounded by
+   * compactionWaitMs so a stuck or cancelled compaction degrades to the
+   * normal delivery-error path (advance + ledger) instead of hanging a wave.
+   */
+  private async sendAgentMessage(
+    body: string,
+    ctx: ExtensionContext,
+    deliverAs?: "followUp" | "steer",
+  ): Promise<void> {
+    const deadline = Date.now() + this.compactionWaitMs;
+
+    // Event hint: skip doomed first attempts while compaction is flagged.
+    while (this.compacting && Date.now() < deadline) {
+      await this.sleep(this.compactionPollMs);
+    }
+
+    for (;;) {
+      try {
+        this.sendNow(body, ctx, deliverAs);
+        this.compacting = false; // flag can go stale (cancelled compaction)
+        return;
+      } catch (err) {
+        if (!isCompactionBusyError(err)) throw err;
+        if (Date.now() >= deadline) throw err;
+        // pi is still compacting — this throw is authoritative even when the
+        // event flag is stale, so retry the send on a fixed cadence.
+        await this.sleep(this.compactionPollMs);
+      }
     }
   }
 
@@ -342,7 +424,7 @@ export class ScheduleRunner {
       source: opts.source,
       forced: opts.forced,
     });
-    this.sendAgentMessage(body, ctx, opts.deliverAs);
+    await this.sendAgentMessage(body, ctx, opts.deliverAs);
     return { detail: "prompt", wokeAgent: true };
   }
 
@@ -412,7 +494,7 @@ export class ScheduleRunner {
           result: lastShell,
           instruction,
         });
-        this.sendAgentMessage(body, ctx, opts.deliverAs);
+        await this.sendAgentMessage(body, ctx, opts.deliverAs);
         wokeAgent = true;
       }
     }
