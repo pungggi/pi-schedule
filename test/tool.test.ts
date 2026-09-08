@@ -13,7 +13,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { RunLedger, buildRun } from "../src/ledger.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
@@ -485,5 +485,82 @@ describe("schedule tool — not_found branches", () => {
     expect(
       text(await s.exec({ action: "disable", id: "ghost" }) as any),
     ).toContain("not found");
+  });
+});
+
+describe("schedule tool — high-privilege create notice (P3)", () => {
+  it("shell create warns at create time (console when no UI)", async () => {
+    const s = setup();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      text(
+        await s.exec({
+          action: "create",
+          name: "poll",
+          kind: "shell",
+          command: "npm test",
+          every: "1h",
+        }) as any,
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      const msg = spy.mock.calls[0]![0] as string;
+      expect(msg).toContain("[pi-schedule] created shell (runs as mutate) job");
+      expect(msg).toContain("fire unattended");
+      expect(msg).toContain("npm test");
+      expect(msg).toContain("action=cancel");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("prompt create with tier=mutate warns; read_only prompt create is silent", async () => {
+    const s = setup();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      text(
+        await s.exec({
+          action: "create",
+          name: "quiet",
+          prompt: "p",
+          every: "1h",
+        }) as any,
+      );
+      expect(spy).not.toHaveBeenCalled();
+
+      text(
+        await s.exec({
+          action: "create",
+          name: "loud",
+          prompt: "p",
+          every: "1h",
+          tier: "mutate",
+        }) as any,
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]![0]).toContain("tier=mutate");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("global shell create names the blast radius: every future session, any project", async () => {
+    const s = setup();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      text(
+        await s.exec({
+          action: "create",
+          name: "g",
+          kind: "shell",
+          command: "uptime",
+          every: "1d",
+          scope: "global",
+        }) as any,
+      );
+      const msg = spy.mock.calls[0]![0] as string;
+      expect(msg).toContain("every future session, in any project");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

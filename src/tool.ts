@@ -187,7 +187,7 @@ export function registerScheduleTool(
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd);
+            return handleCreate(store, params, cwd, ctx, pi);
           case "list":
             return handleList(store, cwd);
           case "cancel":
@@ -240,6 +240,8 @@ function handleCreate(
     tier?: PrivilegeTier;
   },
   cwd: string,
+  ctx: ExtensionContext,
+  pi: ExtensionAPI,
 ) {
   if (!createLimiter.tryTake()) {
     return textResult(
@@ -297,6 +299,8 @@ function handleCreate(
       ? `  command=${JSON.stringify(job.command)}  wakeOn=${job.wakeOn}`
       : "";
 
+  notifyHighPrivilegeCreate(pi, ctx, job);
+
   return textResult(
     [
       `Created job ${job.id} "${job.name}" (${formatSchedule(job.schedule)}, ${job.scope}).`,
@@ -306,6 +310,55 @@ function handleCreate(
     ].join("\n"),
     { job },
   );
+}
+
+/**
+ * P3 persistence-amplification mitigation: creating a shell or mutate job is
+ * the highest-privilege act this tool offers — the job persists across
+ * sessions and fires unattended (global scope: in every session). A
+ * prompt-injected turn could otherwise create one silently. Surface it to the
+ * human at *create* time (the fire-time notify comes after execution), on
+ * every channel available: UI notify, console, and a display-only session
+ * message. Never blocks — best-effort.
+ */
+function notifyHighPrivilegeCreate(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext | undefined,
+  job: ScheduledJob,
+): void {
+  const isShell = job.action === "shell";
+  const isMutate = job.tier === "mutate";
+  if (!isShell && !isMutate) return;
+
+  const where =
+    job.scope === "global"
+      ? "every future session, in any project"
+      : "this project's future sessions";
+  const cmd = isShell ? ` command=${JSON.stringify(job.command)}` : "";
+  const msg =
+    `[pi-schedule] created ${isShell ? "shell (runs as mutate)" : "prompt (tier=mutate)"} job "${job.name}" ` +
+    `— it will fire unattended in ${where}.${cmd} ` +
+    `If you did not expect this, cancel it: schedule action=cancel id=${job.id}`;
+
+  try {
+    if (ctx?.hasUI) ctx.ui.notify(msg, "warning");
+    else console.warn(msg);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    pi.sendMessage?.(
+      {
+        customType: "pi-schedule",
+        content: msg,
+        display: true,
+        details: { jobId: job.id, kind: "create-notice", scope: job.scope, tier: job.tier },
+      },
+      { triggerTurn: false },
+    );
+  } catch {
+    /* best-effort */
+  }
 }
 
 function handleList(store: ScheduleStore, cwd: string) {
