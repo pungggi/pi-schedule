@@ -92,6 +92,16 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
   } catch {
     action = DEFAULT_JOB_ACTION;
   }
+  const clamp = (s: string | undefined, max: number): string | undefined =>
+    s === undefined ? undefined : s.slice(0, max);
+  // Foreign rows may carry non-string fields despite the type; coerce safely.
+  const asStr = (v: unknown, fallback = ""): string =>
+    typeof v === "string" ? v : fallback;
+  // A non-string projectPath would crash resolve() downstream; drop it.
+  const projectPath =
+    typeof raw.projectPath === "string" && raw.projectPath
+      ? raw.projectPath
+      : undefined;
   const wakeOn = raw.wakeOn !== undefined && isWakeOn(raw.wakeOn) ? raw.wakeOn : undefined;
   const timeoutMs =
     raw.timeoutMs !== undefined &&
@@ -108,8 +118,13 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
   return {
     ...raw,
     action,
-    prompt: raw.prompt ?? "",
+    name: asStr(raw.name, "unnamed").slice(0, LIMITS.maxNameChars),
+    prompt: asStr(raw.prompt).slice(0, LIMITS.maxPromptChars),
+    command: clamp(asStr(raw.command) || undefined, LIMITS.maxCommandChars),
+    successPrompt: clamp(asStr(raw.successPrompt) || undefined, LIMITS.maxPromptChars),
+    failurePrompt: clamp(asStr(raw.failurePrompt) || undefined, LIMITS.maxPromptChars),
     wakeOn,
+    projectPath,
     timeoutMs,
     maxRuns,
     terminated: raw.terminated ?? null,
@@ -163,6 +178,11 @@ function readStoreFile(filePath: string): ScheduleStoreFile {
     quarantineAndThrow(filePath, "invalid JSON");
   }
 
+  // JSON "null" / primitives parse fine but are not store objects.
+  if (typeof parsed !== "object" || parsed === null) {
+    quarantineAndThrow(filePath, "not a store object");
+  }
+
   if (parsed.version !== STORE_VERSION) {
     quarantineAndThrow(
       filePath,
@@ -171,6 +191,16 @@ function readStoreFile(filePath: string): ScheduleStoreFile {
   }
   if (!Array.isArray(parsed.jobs)) {
     quarantineAndThrow(filePath, "missing jobs array");
+  }
+  if (
+    !parsed.jobs.every(
+      (j): j is ScheduledJob =>
+        typeof j === "object" && j !== null && !Array.isArray(j),
+    )
+  ) {
+    // A null/number/string row previously escaped as a raw TypeError from
+    // normalizeJob; treat it like any other corrupt file.
+    quarantineAndThrow(filePath, "jobs array contains invalid rows");
   }
 
   return {

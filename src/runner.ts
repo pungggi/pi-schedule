@@ -255,14 +255,17 @@ export class ScheduleRunner {
       let candidates: ScheduledJob[];
 
       if (meta.jobIds && meta.jobIds.length > 0) {
+        // Resolve against the CALLING context's cwd (run_now comes from the
+        // tool ctx; this.cwd may lag after a mid-session directory change).
+        const lookupCwd = ctx.cwd ?? this.cwd;
         candidates = meta.jobIds
-          .map((id) => this.opts.store.get(id, this.cwd))
+          .map((id) => this.opts.store.get(id, lookupCwd))
           .filter((j): j is ScheduledJob => Boolean(j));
       } else {
         if (meta.source === "tick" && !ctx.isIdle()) {
           return [];
         }
-        candidates = this.opts.store.dueJobs(this.cwd, now);
+        candidates = this.opts.store.dueJobs(ctx.cwd ?? this.cwd, now);
       }
 
       if (candidates.length === 0) return [];

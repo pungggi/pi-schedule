@@ -3,6 +3,7 @@ import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
   defuseFences,
+  notifyLabel,
   stripControlChars,
 } from "../src/prompt.js";
 import { parseSchedule } from "../src/schedule.js";
@@ -105,6 +106,28 @@ describe("buildShellFollowUpPrompt", () => {
     expect(text).toContain("FAIL auth");
     expect(text).toContain("Fix the failing tests.");
     expect(text).toContain("PRIVILEGE: mutate");
+  });
+});
+
+describe("notifyLabel sanitization (P3 robustness)", () => {
+  it("strips control chars and collapses newlines from hostile names/prompts", () => {
+    const label = notifyLabel({
+      ...base,
+      name: "ev\u001b[2Jil\nname",
+      prompt: "cl\u0007ear\nthe\rterminal",
+    });
+    expect(label).not.toContain("\u001b");
+    expect(label).not.toContain("\u0007");
+    expect(label).not.toContain("\n");
+    expect(label).toContain("[pi-schedule]");
+  });
+
+  it("an all-control name degrades to 'unnamed' — never the raw value", () => {
+    const evil = "\u0007\u001b";
+    const label = notifyLabel({ ...base, name: evil, prompt: "" });
+    expect(label).not.toContain("\u0007");
+    expect(label).not.toContain("\u001b");
+    expect(label).toContain("unnamed");
   });
 });
 

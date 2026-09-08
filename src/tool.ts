@@ -263,6 +263,12 @@ function handleCreate(
       error: "name_required",
     });
   }
+  if (params.name.trim().length > LIMITS.maxNameChars) {
+    return textResult(
+      `Error: name is too long (${params.name.trim().length} chars; max ${LIMITS.maxNameChars})`,
+      { error: "name_too_long" },
+    );
+  }
 
   const normalized = normalizeCreateAction({
     kind: params.kind,

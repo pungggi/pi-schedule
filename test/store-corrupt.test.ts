@@ -9,7 +9,7 @@ import {
   mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseSchedule } from "../src/schedule.js";
 import { ScheduleStore, StoreError, defaultPaths } from "../src/store.js";
@@ -142,5 +142,158 @@ describe("corrupt store quarantine", () => {
     // The fresh lock is untouched — not stolen, not deleted.
     expect(existsSync(`${paths.globalFile}.lock`)).toBe(true);
     expect(readFileSync(`${paths.globalFile}.lock`, "utf8")).toBe("fresh-token");
+  });
+});
+
+describe("corrupt store quarantine — invalid rows (P3 robustness)", () => {
+  it("quarantines jobs:[null] instead of throwing a raw TypeError", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-rows-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const paths = defaultPaths(home);
+    mkdirSync(paths.globalDir, { recursive: true });
+    writeFileSync(
+      paths.globalFile,
+      JSON.stringify({ version: 1, jobs: [null] }),
+      "utf8",
+    );
+
+    const store = new ScheduleStore(paths);
+    try {
+      store.listForCwd(root);
+      expect.unreachable("must throw StoreError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(StoreError);
+      expect((err as StoreError).message).toContain("invalid rows");
+    }
+    expect(
+      readdirSync(paths.globalDir).some((n) =>
+        n.startsWith("schedules.json.corrupt-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("quarantines non-object rows (string / number)", () => {
+    for (const bad of ["x", 42]) {
+      const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-rows2-"));
+      temps.push(root);
+      const home = join(root, "home");
+      const paths = defaultPaths(home);
+      mkdirSync(paths.globalDir, { recursive: true });
+      writeFileSync(
+        paths.globalFile,
+        JSON.stringify({ version: 1, jobs: [bad] }),
+        "utf8",
+      );
+      const store = new ScheduleStore(paths);
+      expect(() => store.listForCwd(root)).toThrow(StoreError);
+    }
+  });
+
+  it("quarantines a JSON `null` / primitive store body (not a raw TypeError)", () => {
+    for (const bad of ["null", "42", '"text"']) {
+      const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-null-"));
+      temps.push(root);
+      const home = join(root, "home");
+      const paths = defaultPaths(home);
+      mkdirSync(paths.globalDir, { recursive: true });
+      writeFileSync(paths.globalFile, bad, "utf8");
+      const store = new ScheduleStore(paths);
+      try {
+        store.listForCwd(root);
+        expect.unreachable("must throw StoreError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(StoreError);
+        expect((err as StoreError).message).toContain("not a store object");
+      }
+    }
+  });
+
+  it("coerces a non-string projectPath instead of crashing resolve()", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-coerce-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const project = join(root, "proj");
+    mkdirSync(join(project, ".pi"), { recursive: true });
+    const paths = defaultPaths(home);
+    const base = {
+      id: "pp42",
+      name: "weird",
+      prompt: "p",
+      action: "prompt",
+      projectPath: 42, // hostile row: non-string path
+      schedule: { type: "interval", everyMs: 3_600_000, every: "1h" },
+      scope: "project",
+      enabled: true,
+      missedWindow: "catch_up_one",
+      tier: "read_only",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      lastRunAt: null,
+      nextRunAt: "2025-01-02T00:00:00.000Z",
+      runCount: 0,
+      lastStatus: null,
+    };
+    writeFileSync(
+      join(project, ".pi", "schedule.json"),
+      JSON.stringify({ version: 1, jobs: [base] }),
+      "utf8",
+    );
+    const store = new ScheduleStore(paths);
+    // Previously threw TypeError from resolve(42); now the row loads with the
+    // bogus path dropped — and the project-file mapping pins it to this
+    // project's root (documented: provenance is the file, not the label).
+    expect(() => store.listForCwd(project)).not.toThrow();
+    const jobs = store.listForCwd(project);
+    expect(jobs.map((j) => j.id)).toContain("pp42");
+    expect(jobs[0]?.projectPath).toBe(resolve(project));
+  });
+
+  it("clamps over-length foreign rows on read (name/prompt/command)", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-clamp-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const project = join(root, "proj");
+    mkdirSync(project, { recursive: true });
+    const paths = defaultPaths(home);
+    mkdirSync(join(project, ".pi"), { recursive: true });
+    const hugeName = "N".repeat(5_000);
+    const hugePrompt = "P".repeat(100_000);
+    const hugeCommand = "C".repeat(50_000);
+    writeFileSync(
+      join(project, ".pi", "schedule.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "clamped",
+            name: hugeName,
+            prompt: hugePrompt,
+            action: "shell",
+            command: hugeCommand,
+            schedule: { type: "interval", everyMs: 3_600_000, every: "1h" },
+            scope: "project",
+            projectPath: project,
+            enabled: true,
+            missedWindow: "catch_up_one",
+            tier: "mutate",
+            createdAt: "2025-01-01T00:00:00.000Z",
+            updatedAt: "2025-01-01T00:00:00.000Z",
+            lastRunAt: null,
+            nextRunAt: "2025-01-02T00:00:00.000Z",
+            runCount: 0,
+            lastStatus: null,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new ScheduleStore(paths);
+    const jobs = store.listForCwd(project);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.name.length).toBeLessThanOrEqual(200);
+    expect(jobs[0]!.prompt.length).toBeLessThanOrEqual(20_000);
+    expect((jobs[0]!.command ?? "").length).toBeLessThanOrEqual(10_000);
   });
 });
