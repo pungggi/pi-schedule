@@ -12,6 +12,7 @@ import { JobLockManager } from "./lock.js";
 import { PrivilegeGuard } from "./privilege.js";
 import { ScheduleRunner } from "./runner.js";
 import { ScheduleStore } from "./store.js";
+import { TrustStore } from "./trust.js";
 import { registerScheduleTool } from "./tool.js";
 
 export default function piScheduleExtension(pi: ExtensionAPI): void {
@@ -20,8 +21,9 @@ export default function piScheduleExtension(pi: ExtensionAPI): void {
   const ledger = new RunLedger(paths.runsFile);
   const locks = new JobLockManager(paths.lockDir);
   const privilege = new PrivilegeGuard();
-  const runner = new ScheduleRunner({ store, pi, ledger, locks, privilege });
+  const trust = new TrustStore(paths.trustFile);
+  const runner = new ScheduleRunner({ store, pi, ledger, locks, privilege, trust });
 
   runner.attach();
-  registerScheduleTool(pi, store, runner, ledger);
+  registerScheduleTool(pi, store, runner, ledger, trust);
 }

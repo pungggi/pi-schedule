@@ -170,12 +170,36 @@ ignored and blocks behave as before.
 but it is a real local-execution surface. Prefer narrow commands and
 `wakeOn=failure` so the agent only wakes with context when needed.
 
+**Untrusted-output embedding (P2 fix):** the shell follow-up prompt embeds
+command/stdout/stderr — often attacker-influenced (CI logs, fetched pages) —
+into an unattended mutate-tier turn. `buildShellFollowUpPrompt` therefore
+sanitizes everything it embeds: runs of 3+ backticks are defused with word
+joiners (payload can never close our fences and forge sections), ANSI/C0
+control characters are stripped, header fields (name, cwd) are collapsed to a
+single line (no header/section spoofing), and the contract states that command
+output is untrusted data, not instructions.
+
 **Schedule-tool escalation guard:** the `schedule` tool itself is in the
 privilege block list. A `read_only` or `suggest` fired turn **cannot** call
-`schedule` with `create`/`cancel`/`enable`/`disable`/`run_now` — those persist
-state (and `create` of `kind=shell` would be a read_only → mutate-shell
+`schedule` with `create`/`cancel`/`enable`/`disable`/`run_now`/`trust` — those persist
+state or grant trust (and `create` of `kind=shell` would be a read_only → mutate-shell
 escalation). `list`/`history` stay allowed. To let a scheduled job manage
 other schedules, create it as `tier=mutate`.
+
+**Project trust gate (P1 fix):** a `.pi/schedule.json` can arrive with a
+git-cloned repository, and it can carry `action: "shell"` or `tier: "mutate"`
+rows — auto-firing those would be arbitrary code execution at session start.
+So automatic waves (`session_start` / `tick`) only fire project-scope jobs whose
+project root is listed in `~/.pi-schedule/trusted.json`:
+
+- Untrusted project jobs are held back (stay due, untouched, no ledger rows)
+  and reported once per session-start wave.
+- Trust is granted by `schedule action=trust` in the project, or implicitly by
+  creating a project-scope job in an *interactive* turn (never from a fired
+  turn — a scheduled delivery must not be able to unlock its own gate).
+- `run_now` bypasses the gate: it is an explicit action with the privilege of
+  its calling context (and fired `read_only`/`suggest` turns cannot call it).
+- The trust registry fails closed (unreadable/corrupt → untrusted).
 
 **Not yet:** interactive confirm gate on `tier=mutate` / shell create; command allowlists. (The "custom tools not in the block list" gap is now closed for `read_only` by the strict allowlist; `suggest` remains blocklist-based by design.)
 
@@ -253,6 +277,7 @@ the extension runtime instead of the task reaching the agent.
   schedules.json          # global jobs
   schedules.json.corrupt-*  # quarantined bad files (if any)
   runs.jsonl              # append-only run ledger
+  trusted.json            # project trust registry (auto-fire gate)
   locks/<jobId>.lock      # O_EXCL single-flight
 
 <project>/.pi/schedule.json   # project jobs

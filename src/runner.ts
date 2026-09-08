@@ -41,6 +41,7 @@ import {
   notifyLabel,
 } from "./prompt.js";
 import { StoreError, type ScheduleStore } from "./store.js";
+import { TrustStore } from "./trust.js";
 import type {
   FireSource,
   JobAction,
@@ -113,6 +114,8 @@ export interface RunnerOptions {
   ledger?: RunLedger;
   locks?: JobLockManager;
   privilege?: PrivilegeGuard;
+  /** Project trust registry gating auto-fire of project-scope jobs. */
+  trust?: TrustStore;
   hasInitialPrompt?: () => boolean;
   now?: () => Date;
   tickMs?: number;
@@ -143,6 +146,7 @@ export class ScheduleRunner {
   private readonly ledger: RunLedger;
   private readonly locks: JobLockManager;
   private readonly privilege: PrivilegeGuard;
+  private readonly trust: TrustStore;
 
   constructor(private readonly opts: RunnerOptions) {
     this.hasInitialPrompt = opts.hasInitialPrompt;
@@ -156,6 +160,7 @@ export class ScheduleRunner {
     this.ledger = opts.ledger ?? new RunLedger(paths.runsFile);
     this.locks = opts.locks ?? new JobLockManager(paths.lockDir);
     this.privilege = opts.privilege ?? new PrivilegeGuard();
+    this.trust = opts.trust ?? new TrustStore(paths.trustFile);
   }
 
   /** Bind session lifecycle + privilege hooks. Call once from extension factory. */
@@ -219,6 +224,24 @@ export class ScheduleRunner {
     return this.runWave(ctx, meta);
   }
 
+  /** True while a scheduled delivery is the active agent turn (privilege stack non-empty). */
+  scheduledTurnActive(): boolean {
+    return this.privilege.depth() > 0;
+  }
+
+  /**
+   * Is this job eligible for automatic fire under the project trust gate?
+   * Global jobs always are; project jobs need a trusted project root.
+   */
+  private eligibleForAutoFire(
+    job: ScheduledJob,
+    ctx: ExtensionContext,
+  ): boolean {
+    if (job.scope !== "project") return true;
+    const root = job.projectPath ?? ctx.cwd ?? this.cwd;
+    return this.trust.isTrusted(root);
+  }
+
   private async runWave(
     ctx: ExtensionContext,
     meta: { source: FireSource; jobIds?: string[] },
@@ -242,6 +265,27 @@ export class ScheduleRunner {
       }
 
       if (candidates.length === 0) return [];
+
+      // Trust gate (P1): auto waves never fire project-scope jobs from an
+      // untrusted project root — a cloned .pi/schedule.json can carry
+      // shell/mutate rows (arbitrary code execution). Gated jobs stay due
+      // (untouched, no ledger spam); run_now is explicit and bypasses.
+      let gated: ScheduledJob[] = [];
+      if (meta.source !== "run_now") {
+        const allowed = candidates.filter((j) =>
+          this.eligibleForAutoFire(j, ctx),
+        );
+        gated = candidates.filter(
+          (j) => !this.eligibleForAutoFire(j, ctx),
+        );
+        candidates = allowed;
+        if (candidates.length === 0) {
+          if (meta.source === "session_start" && gated.length > 0) {
+            this.notifyTrustGate(ctx, gated);
+          }
+          return [];
+        }
+      }
 
       const maxFires =
         meta.source === "session_start"
@@ -267,6 +311,10 @@ export class ScheduleRunner {
             attempts += 1;
           }
         }
+      }
+
+      if (meta.source === "session_start" && gated.length > 0) {
+        this.notifyTrustGate(ctx, gated);
       }
 
       return updated;
@@ -298,6 +346,22 @@ export class ScheduleRunner {
     const msg = `[pi-schedule] ${detail}`;
     if (ctx.hasUI) ctx.ui.notify(msg, "error");
     else console.error(msg);
+  }
+
+  /** Info-level notify (UI or console) — no cooldown; used once per wave. */
+  private notifyInfo(ctx: ExtensionContext, msg: string): void {
+    if (ctx.hasUI) ctx.ui.notify(msg, "info");
+    else console.log(msg);
+  }
+
+  /** Tell the user project jobs were held back by the trust gate (once per session_start wave). */
+  private notifyTrustGate(ctx: ExtensionContext, gated: ScheduledJob[]): void {
+    const names = gated.map((j) => `"${j.name}" (${j.id})`).join(", ");
+    this.notifyInfo(
+      ctx,
+      `[pi-schedule] held back ${gated.length} project job(s) — this project is not trusted: ${names}. ` +
+        `Inspect .pi/schedule.json (untrusted files can carry shell jobs), then allow auto-fire with: schedule action=trust`,
+    );
   }
 
   private alreadyDelivered(job: ScheduledJob, key: string): boolean {
