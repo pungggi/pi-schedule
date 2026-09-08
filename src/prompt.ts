@@ -119,6 +119,11 @@ export function buildShellFollowUpPrompt(input: ShellFollowUpInput): string {
 
 /** Compact notify / list label for a job. */
 export function notifyLabel(job: ScheduledJob): string {
-  const body = job.prompt.trim() || job.name;
-  return `[pi-schedule] ${job.name}: ${body}`;
+  // Strip control chars (ANSI escapes can spoof/clear the terminal when a
+  // hostile project file supplies the name/prompt) and collapse newlines.
+  const clean = (v: string | undefined): string =>
+    // eslint-disable-next-line no-control-regex
+    (v ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  const body = clean(job.prompt) || clean(job.name) || job.name;
+  return `[pi-schedule] ${clean(job.name)}: ${body}`;
 }

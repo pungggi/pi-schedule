@@ -109,6 +109,20 @@ describe("schedule tool — create", () => {
     ).toContain('requires "prompt"');
   });
 
+  it("rejects an over-length name", async () => {
+    const { exec } = setup();
+    expect(
+      text(
+        await exec({
+          action: "create",
+          name: "N".repeat(201),
+          prompt: "p",
+          every: "1h",
+        }) as any,
+      ),
+    ).toContain("name is too long");
+  });
+
   it("rejects both/neither of every and dailyAt", async () => {
     const { exec } = setup();
     expect(

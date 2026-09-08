@@ -26,6 +26,10 @@ export const LIMITS = {
   maxFiresPerTick: 3,
   /** Soft create rate: max creates per rolling minute (in-process). */
   maxCreatesPerMinute: 10,
+  /** Field length caps — create-time rejection, foreign-row clamping. */
+  maxNameChars: 200,
+  maxPromptChars: 20_000,
+  maxCommandChars: 10_000,
 } as const;
 
 export const DEFAULT_MISSED_WINDOW: MissedWindowPolicy = "catch_up_one";

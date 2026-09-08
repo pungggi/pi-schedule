@@ -207,3 +207,40 @@ describe("terminalReason", () => {
     expect(terminalReason(job, 999)).toBeNull();
   });
 });
+
+describe("create-time length caps (P3 robustness)", () => {
+  it("rejects an over-length shell command", () => {
+    expect(() =>
+      normalizeCreateAction({
+        kind: "shell",
+        command: "x".repeat(10_001),
+      }),
+    ).toThrow(ActionError);
+    try {
+      normalizeCreateAction({ kind: "shell", command: "x".repeat(10_001) });
+    } catch (err) {
+      expect((err as ActionError).message).toContain("too long");
+    }
+  });
+
+  it("accepts a command exactly at the cap", () => {
+    const out = normalizeCreateAction({
+      kind: "shell",
+      command: "x".repeat(10_000),
+    });
+    expect(out.command).toHaveLength(10_000);
+  });
+
+  it("rejects an over-length prompt", () => {
+    expect(() =>
+      normalizeCreateAction({ kind: "prompt", prompt: "p".repeat(20_001) }),
+    ).toThrow(/too long/);
+    expect(() =>
+      normalizeCreateAction({
+        kind: "shell",
+        command: "true",
+        successPrompt: "s".repeat(20_001),
+      }),
+    ).toThrow(/too long/);
+  });
+});

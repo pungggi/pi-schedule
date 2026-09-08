@@ -178,6 +178,10 @@ function makeHarness(opts: HarnessOpts = {}) {
     setIdle: (b: boolean) => {
       idle = b;
     },
+    /** Mutate the shared ctx cwd (simulates a directory change mid-session). */
+    setCwd: (p: string) => {
+      ctx.cwd = p;
+    },
     forceDue: (id: string, when = T0) => {
       const j = store.get(id, project);
       if (j) store.upsert({ ...j, nextRunAt: when });
@@ -735,6 +739,39 @@ describe("ScheduleRunner — termination (once / maxRuns)", () => {
 });
 
 describe("ScheduleRunner — review P2 follow-ups", () => {
+  it("run_now resolves the job via the CALLING ctx cwd, not a stale runner cwd", async () => {
+    const h = makeHarness();
+    h.runner.attach();
+    await h.emit("session_start", { type: "session_start", reason: "new" });
+
+    // A job that lives in a DIFFERENT project than the runner's last cwd.
+    const other = join(h.root, "other-project");
+    const job = h.store.create({
+      name: "elsewhere",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "project",
+      projectPath: other,
+    });
+    h.store.upsert({
+      ...job,
+      nextRunAt: T0,
+    });
+
+    // Caller context is now in that project; runner.cwd still points at the
+    // original one. run_now must find and fire the job.
+    h.setCwd(other);
+    const results = await h.runner.fireDue(h.ctx, {
+      source: "run_now",
+      jobIds: [job.id],
+    });
+
+    expect(results).toHaveLength(1);
+    expect(h.sent).toHaveLength(1);
+    expect(h.store.get(job.id, other)?.lastStatus).toBe("ok");
+    await h.emit("session_shutdown");
+  });
+
   it("message action degrades to console when sendMessage is unavailable", async () => {
     const h = makeHarness({ noSendMessage: true });
     const job = h.store.create({

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildFirePrompt, buildShellFollowUpPrompt } from "../src/prompt.js";
+import {
+  buildFirePrompt,
+  buildShellFollowUpPrompt,
+  notifyLabel,
+} from "../src/prompt.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { ScheduledJob, ShellRunResult } from "../src/types.js";
 
@@ -100,5 +104,19 @@ describe("buildShellFollowUpPrompt", () => {
     expect(text).toContain("FAIL auth");
     expect(text).toContain("Fix the failing tests.");
     expect(text).toContain("PRIVILEGE: mutate");
+  });
+});
+
+describe("notifyLabel sanitization (P3 robustness)", () => {
+  it("strips control chars and collapses newlines from hostile names/prompts", () => {
+    const label = notifyLabel({
+      ...base,
+      name: "ev\u001b[2Jil\nname",
+      prompt: "cl\u0007ear\nthe\rterminal",
+    });
+    expect(label).not.toContain("\u001b");
+    expect(label).not.toContain("\u0007");
+    expect(label).not.toContain("\n");
+    expect(label).toContain("[pi-schedule]");
   });
 });

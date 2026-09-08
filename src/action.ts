@@ -5,6 +5,7 @@
  * Delivery lives in the runner; this module stays side-effect free.
  */
 
+import { LIMITS } from "./policy.js";
 import type {
   JobAction,
   ScheduledJob,
@@ -172,12 +173,18 @@ export interface NormalizedCreateAction {
 
 /**
  * Validate + normalize create-time action fields.
- * Throws ActionError on invalid combinations.
+ * Throws ActionError on invalid combinations or over-length payloads.
  */
 export function normalizeCreateAction(
   fields: CreateActionFields,
 ): NormalizedCreateAction {
   const action = normalizeJobAction(fields.kind);
+
+  const checkLen = (label: string, v: string | undefined, max: number): void => {
+    if (v !== undefined && v.length > max) {
+      throw new ActionError(`${label} is too long (${v.length} chars; max ${max})`);
+    }
+  };
 
   if (action === "shell") {
     const command = fields.command?.trim();
@@ -186,9 +193,13 @@ export function normalizeCreateAction(
         'kind=shell requires "command" (e.g. "npm test" or "glab pipeline view 123").',
       );
     }
+    checkLen("command", command, LIMITS.maxCommandChars);
     const prompt = fields.prompt?.trim() ?? "";
     const successPrompt = fields.successPrompt?.trim() || undefined;
     const failurePrompt = fields.failurePrompt?.trim() || undefined;
+    checkLen("prompt", prompt, LIMITS.maxPromptChars);
+    checkLen("successPrompt", successPrompt, LIMITS.maxPromptChars);
+    checkLen("failurePrompt", failurePrompt, LIMITS.maxPromptChars);
     if (fields.wakeOn !== undefined && fields.wakeOn !== "" && !isWakeOn(fields.wakeOn)) {
       throw new ActionError(
         `Invalid wakeOn "${fields.wakeOn}". Use always | failure | success | never.`,
@@ -224,6 +235,7 @@ export function normalizeCreateAction(
         : `kind=${action} requires "prompt" (the ${action} text).`,
     );
   }
+  checkLen("prompt", prompt, LIMITS.maxPromptChars);
   if (fields.command?.trim()) {
     throw new ActionError(
       `"command" is only valid for kind=shell (got kind=${action}).`,

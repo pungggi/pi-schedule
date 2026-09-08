@@ -144,3 +144,97 @@ describe("corrupt store quarantine", () => {
     expect(readFileSync(`${paths.globalFile}.lock`, "utf8")).toBe("fresh-token");
   });
 });
+
+describe("corrupt store quarantine — invalid rows (P3 robustness)", () => {
+  it("quarantines jobs:[null] instead of throwing a raw TypeError", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-rows-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const paths = defaultPaths(home);
+    mkdirSync(paths.globalDir, { recursive: true });
+    writeFileSync(
+      paths.globalFile,
+      JSON.stringify({ version: 1, jobs: [null] }),
+      "utf8",
+    );
+
+    const store = new ScheduleStore(paths);
+    try {
+      store.listForCwd(root);
+      expect.unreachable("must throw StoreError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(StoreError);
+      expect((err as StoreError).message).toContain("invalid rows");
+    }
+    expect(
+      readdirSync(paths.globalDir).some((n) =>
+        n.startsWith("schedules.json.corrupt-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("quarantines non-object rows (string / number)", () => {
+    for (const bad of ["x", 42]) {
+      const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-rows2-"));
+      temps.push(root);
+      const home = join(root, "home");
+      const paths = defaultPaths(home);
+      mkdirSync(paths.globalDir, { recursive: true });
+      writeFileSync(
+        paths.globalFile,
+        JSON.stringify({ version: 1, jobs: [bad] }),
+        "utf8",
+      );
+      const store = new ScheduleStore(paths);
+      expect(() => store.listForCwd(root)).toThrow(StoreError);
+    }
+  });
+
+  it("clamps over-length foreign rows on read (name/prompt/command)", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-clamp-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const project = join(root, "proj");
+    mkdirSync(project, { recursive: true });
+    const paths = defaultPaths(home);
+    mkdirSync(join(project, ".pi"), { recursive: true });
+    const hugeName = "N".repeat(5_000);
+    const hugePrompt = "P".repeat(100_000);
+    const hugeCommand = "C".repeat(50_000);
+    writeFileSync(
+      join(project, ".pi", "schedule.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "clamped",
+            name: hugeName,
+            prompt: hugePrompt,
+            action: "shell",
+            command: hugeCommand,
+            schedule: { type: "interval", everyMs: 3_600_000, every: "1h" },
+            scope: "project",
+            projectPath: project,
+            enabled: true,
+            missedWindow: "catch_up_one",
+            tier: "mutate",
+            createdAt: "2025-01-01T00:00:00.000Z",
+            updatedAt: "2025-01-01T00:00:00.000Z",
+            lastRunAt: null,
+            nextRunAt: "2025-01-02T00:00:00.000Z",
+            runCount: 0,
+            lastStatus: null,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new ScheduleStore(paths);
+    const jobs = store.listForCwd(project);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.name.length).toBeLessThanOrEqual(200);
+    expect(jobs[0]!.prompt.length).toBeLessThanOrEqual(20_000);
+    expect((jobs[0]!.command ?? "").length).toBeLessThanOrEqual(10_000);
+  });
+});
