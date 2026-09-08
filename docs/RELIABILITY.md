@@ -141,9 +141,17 @@ is later replayed as a user message — a **stored-instruction persistence vecto
 
 | Tier | Prompt | Structural (`tool_call`) |
 |------|--------|---------------------------|
-| `read_only` | no mutations | blocks `edit`, `write`, `bash` until `agent_settled` |
-| `suggest` | drafts OK | blocks `bash` |
+| `read_only` | no mutations | **strict allowlist**: known read tools only (incl. read-only terminal inspection — `terminal_read`/`terminal_list`/`terminal_wait`); `edit`/`write`/`bash`, terminal *exec/write* tools (`terminal_exec`, `terminal_tools`, …), `mcp`, peer messaging, and unknown tools all fail closed (`PI_SCHEDULE_PRIVILEGE_MODE=legacy` → old core blocklist) |
+| `suggest` | drafts OK | blocks `bash` + terminal exec/write surfaces (incl. the `terminal_tools` loader) + peer messaging |
 | `mutate` | changes allowed | none |
+
+Why allowlist for `read_only`: a blocklist of core tools cannot cover the
+tool ecosystem — `terminal_exec` from another extension executes arbitrary
+commands, the `mcp` gateway can reach registered write tools, and peer
+messaging can drive other agents that hold higher privilege. Unknown names
+fail closed; the allowlist is the source of truth (`READ_ONLY_ALLOW_TOOLS` in
+`src/privilege.ts`). `mcp` is deliberately excluded: a name-level allow
+cannot tell a read from a write behind the gateway.
 
 Privilege enters **only when an agent turn starts** (prompt jobs, or shell jobs
 that wake). `notify` / `message` / quiet shell runs do not push the stack.
@@ -193,7 +201,7 @@ project root is listed in `~/.pi-schedule/trusted.json`:
   its calling context (and fired `read_only`/`suggest` turns cannot call it).
 - The trust registry fails closed (unreadable/corrupt → untrusted).
 
-**Not yet:** interactive confirm gate on `tier=mutate` / shell create; custom tools not in the block list; command allowlists.
+**Not yet:** interactive confirm gate on `tier=mutate` / shell create; command allowlists. (The "custom tools not in the block list" gap is now closed for `read_only` by the strict allowlist; `suggest` remains blocklist-based by design.)
 
 ### 8. Self-spam / runaway scheduling
 
