@@ -85,6 +85,8 @@ schedule
 
 Shell jobs always store `tier=mutate` (command runs outside the agent tool path). Prefer `wakeOn=failure` for CI polls so success is silent.
 
+**Never embed secrets in `command`.** The command is stored verbatim (it must re-run) and is visible in `list`; persisted shell *output* is automatically scrubbed of common credential shapes (`Bearer …`, `api_key=…`, `ghp_…`/`sk-…`/`AKIA…` tokens → `[REDACTED]`) before it lands in `schedules.json` or the session transcript — but redaction is pattern-based, not a guarantee. Use env vars or a credentials file instead.
+
 ### Lifecycle: `once` and `maxRuns`
 
 - **`once`** — fire one time after a relative delay (`once="10m"`, `once="30s"`), then auto-disable. Ideal for reminders and delayed follow-ups. `run_now` won't re-fire a terminated one-shot — recreate it.

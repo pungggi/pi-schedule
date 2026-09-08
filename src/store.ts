@@ -263,8 +263,11 @@ function readLockToken(lockPath: string): string | undefined {
  * over — never a fresh, active writer. Force-stealing a fresh lock would lose
  * concurrent RMW writes, which is exactly the race this lock exists to prevent.
  * Stale takeover uses rename (not unlink) so at most one racer claims the orphan.
+ *
+ * Exported for the run-ledger rotation (ledger.ts) — the same cross-process
+ * serialization applies to its read/rename compaction.
  */
-function withFileLock<T>(filePath: string, fn: () => T): T {
+export function withFileLock<T>(filePath: string, fn: () => T): T {
   const lockPath = `${filePath}.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
   const token = `${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`;
