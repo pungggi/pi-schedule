@@ -330,13 +330,27 @@ function notifyHighPrivilegeCreate(
   const isMutate = job.tier === "mutate";
   if (!isShell && !isMutate) return;
 
+  // The notice itself must survive a hostile name/command: control chars
+  // (incl. C1 8-bit CSI/OSC) could clear/reposition the terminal and conceal
+  // the very warning this mitigation exists to surface. Newlines collapse so
+  // the notice stays one line. JSON.stringify already escapes C0 in the
+  // command display; the extra pass catches C1.
+  const clean = (v: string): string =>
+    // eslint-disable-next-line no-control-regex
+    v
+      .replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
   const where =
     job.scope === "global"
       ? "every future session, in any project"
       : "this project's future sessions";
-  const cmd = isShell ? ` command=${JSON.stringify(job.command)}` : "";
+  const cmd = isShell
+    ? ` command=${clean(JSON.stringify(job.command))}`
+    : "";
   const msg =
-    `[pi-schedule] created ${isShell ? "shell (runs as mutate)" : "prompt (tier=mutate)"} job "${job.name}" ` +
+    `[pi-schedule] created ${isShell ? "shell (runs as mutate)" : "prompt (tier=mutate)"} job "${clean(job.name)}" ` +
     `— it will fire unattended in ${where}.${cmd} ` +
     `If you did not expect this, cancel it: schedule action=cancel id=${job.id}`;
 
