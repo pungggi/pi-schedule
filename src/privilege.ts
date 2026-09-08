@@ -16,7 +16,7 @@
  * Critical: `schedule` is itself a mutating surface. A read_only/suggest fired
  * turn must NOT be able to persist a `kind=shell` job (or any state change),
  * because that job later fires as tier=mutate — a read_only → shell-escalation
- * vector. So mutating schedule actions (create/cancel/enable/disable/run_now)
+ * vector. So mutating schedule actions (create/cancel/enable/disable/run_now/trust)
  * are blocked under read_only and suggest. list/history stay allowed (reads).
  */
 
@@ -26,13 +26,14 @@ import type { PrivilegeTier } from "./types.js";
 const MUTATE_TOOLS = new Set(["edit", "write", "bash"]);
 const SUGGEST_BLOCK = new Set(["bash"]); // drafts OK; shell is the high-blast tool
 
-/** schedule actions that mutate job state / trigger fires. */
+/** schedule actions that mutate job state / trigger fires / grant trust. */
 const SCHEDULE_MUTATE_ACTIONS = new Set([
   "create",
   "cancel",
   "enable",
   "disable",
   "run_now",
+  "trust",
 ]);
 
 /** True if a schedule tool_call would mutate state (vs a read like list/history). */

@@ -60,6 +60,8 @@ export interface StorePaths {
   projectFile: (projectRoot: string) => string;
   runsFile: string;
   lockDir: string;
+  /** Project trust registry (see trust.ts). */
+  trustFile: string;
 }
 
 export function defaultPaths(home: string = homedir()): StorePaths {
@@ -70,6 +72,7 @@ export function defaultPaths(home: string = homedir()): StorePaths {
     projectFile: (projectRoot: string) => join(resolve(projectRoot), PROJECT_REL),
     runsFile: join(globalDir, "runs.jsonl"),
     lockDir: join(globalDir, "locks"),
+    trustFile: join(globalDir, "trusted.json"),
   };
 }
 

@@ -7,6 +7,7 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
 import { Type } from "typebox";
 import {
   ActionError,
@@ -29,6 +30,7 @@ import {
 } from "./schedule.js";
 import type { ScheduleRunner } from "./runner.js";
 import { StoreError, defaultScope, type ScheduleStore } from "./store.js";
+import { TrustStore } from "./trust.js";
 import type {
   MissedWindowPolicy,
   PrivilegeTier,
@@ -45,6 +47,7 @@ const ScheduleParams = Type.Object({
     "disable",
     "run_now",
     "history",
+    "trust",
   ] as const),
   name: Type.Optional(Type.String({ description: "Job name (create)" })),
   /**
@@ -165,6 +168,7 @@ export function registerScheduleTool(
   store: ScheduleStore,
   runner: ScheduleRunner,
   ledger?: RunLedger,
+  trust: TrustStore = new TrustStore(store.pathsInfo().trustFile),
 ): void {
   const runLedger = ledger ?? new RunLedger(store.pathsInfo().runsFile);
 
@@ -173,12 +177,13 @@ export function registerScheduleTool(
     label: "Schedule",
     description:
       "Manage scheduled agent tasks and actions (reviews, polls, shell checks, reminders). " +
-      "Actions: create, list, cancel, enable, disable, run_now, history. " +
+      "Actions: create, list, cancel, enable, disable, run_now, history, trust. " +
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
       "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on session start (unless pi was launched with an initial prompt) " +
-      "and while the session is open. See package docs/RELIABILITY.md.",
+      "and while the session is open. Project-scope jobs only auto-fire in trusted " +
+      "projects (action=trust trusts the current project). See package docs/RELIABILITY.md.",
     parameters: ScheduleParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -187,9 +192,9 @@ export function registerScheduleTool(
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd);
+            return handleCreate(store, params, cwd, runner, trust);
           case "list":
-            return handleList(store, cwd);
+            return handleList(store, cwd, trust);
           case "cancel":
             return handleCancel(store, params.id, cwd);
           case "enable":
@@ -200,6 +205,8 @@ export function registerScheduleTool(
             return await handleRunNow(store, runner, params.id, cwd, ctx);
           case "history":
             return handleHistory(runLedger, params.id, params.limit);
+          case "trust":
+            return handleTrust(store, trust, cwd);
           default:
             return textResult(`Unknown action: ${String(params.action)}`, {
               error: "unknown_action",
@@ -240,6 +247,8 @@ function handleCreate(
     tier?: PrivilegeTier;
   },
   cwd: string,
+  runner: ScheduleRunner,
+  trust: TrustStore,
 ) {
   if (!createLimiter.tryTake()) {
     return textResult(
@@ -292,6 +301,13 @@ function handleCreate(
     tier,
   });
 
+  // Creating a job here is an explicit act in this project — trust it for
+  // auto-fire. Never auto-trust from a *scheduled* turn (a fired turn must
+  // not be able to unlock its own project's gate).
+  if (scope === "project" && !runner.scheduledTurnActive()) {
+    trust.trust(cwd);
+  }
+
   const shellBits =
     job.action === "shell"
       ? `  command=${JSON.stringify(job.command)}  wakeOn=${job.wakeOn}`
@@ -308,7 +324,11 @@ function handleCreate(
   );
 }
 
-function handleList(store: ScheduleStore, cwd: string) {
+function handleList(
+  store: ScheduleStore,
+  cwd: string,
+  trust: TrustStore,
+) {
   const jobs = store.listForCwd(cwd);
   if (jobs.length === 0) {
     return textResult(
@@ -316,8 +336,35 @@ function handleList(store: ScheduleStore, cwd: string) {
       { jobs: [] },
     );
   }
-  const body = ["Scheduled jobs:", ...jobs.map((j) => summarize(j))].join("\n");
-  return textResult(body, { jobs });
+  const untrusted = jobs.filter(
+    (j) => j.scope === "project" && !trust.isTrusted(j.projectPath ?? cwd),
+  );
+  const body = [
+    "Scheduled jobs:",
+    ...jobs.map((j) =>
+      summarize(j) +
+      (untrusted.some((u) => u.id === j.id) ? "\n  [untrusted-project — will not auto-fire; schedule action=trust]" : ""),
+    ),
+  ];
+  if (untrusted.length > 0) {
+    body.push(
+      `\n${untrusted.length} project job(s) are in an untrusted project: they never auto-fire. ` +
+        `Inspect .pi/schedule.json first, then run schedule action=trust to allow auto-fire.`,
+    );
+  }
+  return textResult(body.join("\n"), { jobs });
+}
+
+function handleTrust(store: ScheduleStore, trust: TrustStore, cwd: string) {
+  trust.trust(cwd);
+  const projectJobs = store
+    .listForCwd(cwd)
+    .filter((j) => j.scope === "project");
+  return textResult(
+    `Trusted project ${resolve(cwd)}. ${projectJobs.length} project job(s) can now auto-fire when due. ` +
+      `(Only trust projects you have inspected: .pi/schedule.json can contain shell jobs.)`,
+    { trusted: resolve(cwd), projectJobs: projectJobs.length },
+  );
 }
 
 function handleCancel(store: ScheduleStore, id: string | undefined, cwd: string) {
