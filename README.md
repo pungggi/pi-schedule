@@ -25,12 +25,13 @@ pi -e ./src/extension.ts
 
 | Piece | Behavior |
 |-------|----------|
-| **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history |
+| **Tool** | `schedule` — create / list / cancel / enable / disable / run_now / history / trust |
 | **Kinds** | `prompt` (default) · `shell` · `notify` · `message` — what fires when due |
 | **Storage** | Hybrid: global `~/.pi-schedule/schedules.json` + project `.pi/schedule.json` |
 | **Syntax** | Intervals (`30m`, `2h`, `1d`) and daily wall-clock (`09:00`) |
 | **Fire** | On session start when due; also while the session stays open (30s ticker) |
 | **Skip** | If pi was launched with an initial prompt (`pi "do X"`), due jobs are **not** checked or triggered for that start |
+| **Trust** | Project-scope jobs only auto-fire in **trusted** projects (`schedule action=trust`); global scope is unaffected |
 | **Reliability** | Run ledger, single-flight locks, missed-window policy, privilege tiers, fire caps — see [docs/RELIABILITY.md](docs/RELIABILITY.md) |
 
 Storage is **daemon-ready**: each job tracks `nextRunAt` / `lastRunAt` so a future headless runner can share the same files.
@@ -92,6 +93,22 @@ Shell jobs always store `tier=mutate` (command runs outside the agent tool path)
 - **`maxRuns`** — cap a recurring job to N deliveries (counts ok + error; skips/locks don't count). After the cap, the job auto-disables with `terminated: maxRuns`. Re-enabling clears the flag and resumes counting.
 
 A terminated job is disabled and excluded from due scans. `list` shows `[off/terminated:once]` or `[…:maxRuns]`.
+
+### Privilege enforcement (strict read_only)
+
+While a scheduled `read_only` turn is active, only a **known-read allowlist**
+of tools may run (`read`, `grep`, `web_search`, semantic search, display, and
+read-only terminal inspection — `terminal_read`/`terminal_list`/
+`terminal_wait`).
+Everything else — `bash`/`edit`/`write`, terminal *exec/write* tools
+(`terminal_exec`, `terminal_tools`, …), the `mcp` gateway,
+peer messaging, and any unknown tool — fails closed. This closes the gap
+where non-core mutating tools (e.g. `terminal_exec`) bypassed the old core
+blocklist. `PI_SCHEDULE_PRIVILEGE_MODE=legacy` restores the old blocklist
+({edit, write, bash} only) if your scheduled tasks need non-core read tools.
+`suggest` blocks exec surfaces (`bash`, `terminal_*` including the
+`terminal_tools` loader) and peer messaging but keeps drafting tools open;
+`mutate` blocks nothing.
 
 ### Examples
 
@@ -167,10 +184,27 @@ jobId: …
 ~/.pi-schedule/
   schedules.json
   runs.jsonl
+  trusted.json
   locks/
 
 <project>/.pi/schedule.json
 ```
+
+## Project trust
+
+A `.pi/schedule.json` that arrives with a cloned repository can carry
+`kind: "shell"` or `tier: "mutate"` jobs — left ungated that is arbitrary
+code execution the moment pi opens in the repo. So **project-scope jobs only
+auto-fire when the project root is trusted** (`~/.pi-schedule/trusted.json`):
+
+- Opening pi in an untrusted project holds due project jobs back (they stay
+  due, untouched) and notifies you once per session start.
+- Trust a project explicitly with `schedule action=trust` (after inspecting
+  its `.pi/schedule.json`), or implicitly by creating a project-scope job
+  there in an interactive turn.
+- `run_now` always bypasses the gate — it is an explicit action carrying the
+  privilege of its calling context.
+- Global-scope jobs are unaffected.
 
 ## Reliability
 

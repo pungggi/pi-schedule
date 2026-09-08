@@ -9,7 +9,7 @@
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ExtensionAPI,
@@ -24,6 +24,7 @@ import {
   resolveShell,
 } from "../src/runner.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
+import { TrustStore } from "../src/trust.js";
 import { parseSchedule } from "../src/schedule.js";
 import type { PrivilegeTier, ScheduledJob } from "../src/types.js";
 
@@ -59,6 +60,7 @@ function makeHarness(opts: HarnessOpts = {}) {
   const ledger = new RunLedger(paths.runsFile);
   const locks = new JobLockManager(paths.lockDir);
   const privilege = new PrivilegeGuard();
+  const trust = new TrustStore(paths.trustFile);
 
   let clock = new Date(T0);
   let idle = opts.idle ?? true;
@@ -135,6 +137,7 @@ function makeHarness(opts: HarnessOpts = {}) {
     ledger,
     locks,
     privilege,
+    trust,
     hasInitialPrompt: () => opts.hasInitialPrompt === true,
     now: () => clock,
     tickMs: 1_000,
@@ -157,12 +160,22 @@ function makeHarness(opts: HarnessOpts = {}) {
       missedWindow,
     });
 
+  const createProject = (name = "pjob"): ScheduledJob =>
+    store.create({
+      name,
+      prompt: "do the thing",
+      schedule: parseSchedule("every 1h"),
+      scope: "project",
+      projectPath: project,
+    });
+
   return {
     root,
     project,
     store,
     ledger,
     privilege,
+    trust,
     runner,
     ctx,
     pi,
@@ -172,6 +185,7 @@ function makeHarness(opts: HarnessOpts = {}) {
     execCalls,
     lockDir: paths.lockDir,
     createGlobal,
+    createProject,
     setClock: (d: Date) => {
       clock = d;
     },
@@ -266,6 +280,159 @@ describe("ScheduleRunner — delivery", () => {
     await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
 
     expect(h.sent).toHaveLength(2);
+  });
+});
+
+describe("ScheduleRunner — project trust gate", () => {
+  /** attach + session_start(new): sets runner cwd to the test project and fires the session_start wave. */
+  async function startSession(h: H) {
+    h.runner.attach();
+    await h.emit("session_start", { type: "session_start", reason: "new" });
+    await h.emit("session_shutdown");
+  }
+
+  it("untrusted project job never auto-fires: untouched, no advance, no ledger", async () => {
+    const h = makeHarness();
+    const job = h.createProject("evil");
+    h.forceDue(job.id);
+
+    await startSession(h);
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+
+    expect(h.sent).toHaveLength(0);
+    expect(h.privilege.depth()).toBe(0);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBeNull();
+    expect(after.runCount).toBe(0);
+    expect(after.nextRunAt).toBe(T0); // still due, untouched
+    expect(h.ledger.history({})).toHaveLength(0);
+    expect(h.notifies.some((m) => m.includes("not trusted"))).toBe(true);
+  });
+
+  it("gate notify fires once per session_start wave, not on ticks", async () => {
+    const h = makeHarness();
+    const job = h.createProject("evil");
+    h.forceDue(job.id);
+
+    await startSession(h);
+    const afterStart = h.notifies.filter((m) => m.includes("not trusted")).length;
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+    const afterTick = h.notifies.filter((m) => m.includes("not trusted")).length;
+
+    expect(afterStart).toBe(1);
+    expect(afterTick).toBe(1); // tick did not add another
+  });
+
+  it("trusted project job auto-fires normally", async () => {
+    const h = makeHarness();
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.forceDue(job.id);
+
+    await startSession(h);
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.store.get(job.id, h.project)?.lastStatus).toBe("ok");
+  });
+
+  it("run_now is explicit and bypasses the trust gate", async () => {
+    const h = makeHarness();
+    const job = h.createProject("manual");
+    h.forceDue(job.id);
+
+    await startSession(h); // holds the job back via the gate
+    expect(h.sent).toHaveLength(0);
+
+    await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.store.get(job.id, h.project)?.lastStatus).toBe("ok");
+  });
+
+  it("global jobs are unaffected by the gate", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal("g");
+    h.forceDue(job.id);
+
+    await startSession(h);
+
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it("cloned project row relabeled 'global' still hits the gate (provenance = file)", async () => {
+    const h = makeHarness();
+    // <project>/.pi/schedule.json ships a past-due shell row claiming
+    // scope "global" — the row's own label must not grant auto-fire trust.
+    const file = join(h.project, ".pi", "schedule.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "clone-shell",
+            name: "cloned",
+            prompt: "",
+            action: "shell",
+            command: "echo pwned",
+            schedule: parseSchedule("every 1h"),
+            enabled: true,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            lastRunAt: null,
+            nextRunAt: T0,
+            runCount: 0,
+            lastStatus: null,
+            scope: "global",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    await startSession(h);
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+
+    expect(h.sent).toHaveLength(0);
+    expect(h.execCalls).toHaveLength(0);
+    expect(h.notifies.some((m) => m.includes("not trusted"))).toBe(true);
+    // row stays due and untouched
+    const after = h.store.get("clone-shell", h.project)!;
+    expect(after.runCount).toBe(0);
+    expect(after.nextRunAt).toBe(T0);
+  });
+
+  it("mixed wave: trusted fires, untrusted held back and reported", async () => {
+    const h = makeHarness();
+    const g = h.createGlobal("g");
+    const p = h.createProject("p");
+    h.forceDue(g.id);
+    h.forceDue(p.id);
+
+    await startSession(h);
+
+    expect(h.sent).toHaveLength(1); // only the global job
+    expect(h.store.get(g.id, h.project)?.lastStatus).toBe("ok");
+    expect(h.store.get(p.id, h.project)?.lastStatus).toBeNull();
+    expect(
+      h.notifies.some((m) => m.includes('"p"') && m.includes("not trusted")),
+    ).toBe(true);
+  });
+
+  it("a wave of only untrusted project jobs reports and fires nothing", async () => {
+    const h = makeHarness();
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const j = h.createProject(`e${i}`);
+      h.forceDue(j.id);
+      ids.push(j.id);
+    }
+    await startSession(h);
+    expect(h.sent).toHaveLength(0);
+    for (const id of ids) {
+      expect(h.store.get(id, h.project)?.runCount).toBe(0);
+    }
   });
 });
 

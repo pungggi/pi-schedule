@@ -60,6 +60,8 @@ export interface StorePaths {
   projectFile: (projectRoot: string) => string;
   runsFile: string;
   lockDir: string;
+  /** Project trust registry (see trust.ts). */
+  trustFile: string;
 }
 
 export function defaultPaths(home: string = homedir()): StorePaths {
@@ -70,6 +72,7 @@ export function defaultPaths(home: string = homedir()): StorePaths {
     projectFile: (projectRoot: string) => join(resolve(projectRoot), PROJECT_REL),
     runsFile: join(globalDir, "runs.jsonl"),
     lockDir: join(globalDir, "locks"),
+    trustFile: join(globalDir, "trusted.json"),
   };
 }
 
@@ -347,7 +350,16 @@ export class ScheduleStore {
     const projectFiltered = project.filter(
       (j) => !j.projectPath || resolve(j.projectPath) === projectRoot,
     );
-    return [...global, ...projectFiltered].map(normalizeJob);
+    // Provenance is which file a row was loaded from — not the row's own
+    // scope label. Rows in <cwd>/.pi/schedule.json are always project jobs
+    // of that root; otherwise a cloned repo could relabel a shell row as
+    // "global" and bypass the project trust gate (P1).
+    return [
+      ...global.map(normalizeJob),
+      ...projectFiltered.map((j) =>
+        normalizeJob({ ...j, scope: "project", projectPath: projectRoot }),
+      ),
+    ];
   }
 
   get(id: string, cwd: string): ScheduledJob | undefined {
