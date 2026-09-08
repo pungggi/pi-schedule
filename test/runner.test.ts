@@ -9,7 +9,7 @@
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ExtensionAPI,
@@ -357,6 +357,50 @@ describe("ScheduleRunner — project trust gate", () => {
     await startSession(h);
 
     expect(h.sent).toHaveLength(1);
+  });
+
+  it("cloned project row relabeled 'global' still hits the gate (provenance = file)", async () => {
+    const h = makeHarness();
+    // <project>/.pi/schedule.json ships a past-due shell row claiming
+    // scope "global" — the row's own label must not grant auto-fire trust.
+    const file = join(h.project, ".pi", "schedule.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "clone-shell",
+            name: "cloned",
+            prompt: "",
+            action: "shell",
+            command: "echo pwned",
+            schedule: parseSchedule("every 1h"),
+            enabled: true,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            lastRunAt: null,
+            nextRunAt: T0,
+            runCount: 0,
+            lastStatus: null,
+            scope: "global",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    await startSession(h);
+    await h.runner.fireDue(h.ctx, { source: "tick" });
+
+    expect(h.sent).toHaveLength(0);
+    expect(h.execCalls).toHaveLength(0);
+    expect(h.notifies.some((m) => m.includes("not trusted"))).toBe(true);
+    // row stays due and untouched
+    const after = h.store.get("clone-shell", h.project)!;
+    expect(after.runCount).toBe(0);
+    expect(after.nextRunAt).toBe(T0);
   });
 
   it("mixed wave: trusted fires, untrusted held back and reported", async () => {
