@@ -4,6 +4,16 @@
  * Uses pi's tool_call hook to block mutating tools while a read_only/suggest
  * scheduled delivery is the active agent turn (until agent_settled).
  *
+ * read_only is enforced **strict** (default): a known-read allowlist — any
+ * tool not on it is blocked. A blocklist of core tools ({edit,write,bash})
+ * cannot cover the ecosystem (terminal_*, MCP write tools, peer messaging),
+ * so unknown tools fail closed. Set PI_SCHEDULE_PRIVILEGE_MODE=legacy to
+ * restore the old core-tool blocklist (documented gap).
+ *
+ * suggest stays blocklist-based by design (edit/write are allowed there for
+ * drafting), with the obvious arbitrary-exec surfaces (bash, terminal exec)
+ * and peer messaging blocked.
+ *
  * Blocks also set `terminate: true` (pi ≥ 0.84.1): a scheduled turn that has
  * wandered off-contract into a mutating tool has no productive path inside the
  * privilege fence, so a fully-blocked batch ends the turn without a wasted
@@ -16,7 +26,7 @@
  * Critical: `schedule` is itself a mutating surface. A read_only/suggest fired
  * turn must NOT be able to persist a `kind=shell` job (or any state change),
  * because that job later fires as tier=mutate — a read_only → shell-escalation
- * vector. So mutating schedule actions (create/cancel/enable/disable/run_now)
+ * vector. So mutating schedule actions (create/cancel/enable/disable/run_now/trust)
  * are blocked under read_only and suggest. list/history stay allowed (reads).
  */
 
@@ -24,15 +34,65 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PrivilegeTier } from "./types.js";
 
 const MUTATE_TOOLS = new Set(["edit", "write", "bash"]);
-const SUGGEST_BLOCK = new Set(["bash"]); // drafts OK; shell is the high-blast tool
+/** Arbitrary-execution surfaces blocked under suggest (drafting tools stay open). */
+const SUGGEST_BLOCK = new Set([
+  "bash",
+  "terminal_exec",
+  "terminal_write",
+  "terminal_write_file",
+  "terminal_run",
+  "terminal_start",
+  "terminal_tools", // loader: activates terminal_retry/terminal_diff etc., which run caller-supplied commands
+]);
+/** Peer messaging: an injected scheduled turn must not drive other agents. */
+const PEER_TOOLS = new Set(["agent_send", "agent_request"]);
 
-/** schedule actions that mutate job state / trigger fires. */
+/**
+ * Tools allowed under tier=read_only in strict mode (the default).
+ *
+ * Deliberately excludes:
+ * - `mcp` — the gateway executes arbitrary registered MCP tools; a name-level
+ *   allow cannot tell a read from a write there
+ * - every mutating/exec surface (fail closed for unknown names)
+ */
+export const READ_ONLY_ALLOW_TOOLS: ReadonlySet<string> = new Set([
+  // core pi read/search
+  "read",
+  "grep",
+  "glob",
+  "find",
+  "ls",
+  "list",
+  // research
+  "web_search",
+  "web_read",
+  // semantic code search
+  "auggie_codebase-retrieval",
+  "codebase-retrieval",
+  // session info / display / read-only terminal
+  "list_peers",
+  "show_file",
+  "show_image",
+  "terminal_read",
+  "terminal_list",
+  "terminal_wait",
+]);
+
+/** Enforcement mode for tier=read_only. strict = allowlist (default), legacy = core blocklist. */
+export function privilegeMode(): "strict" | "legacy" {
+  return process.env["PI_SCHEDULE_PRIVILEGE_MODE"] === "legacy"
+    ? "legacy"
+    : "strict";
+}
+
+/** schedule actions that mutate job state / trigger fires / grant trust. */
 const SCHEDULE_MUTATE_ACTIONS = new Set([
   "create",
   "cancel",
   "enable",
   "disable",
   "run_now",
+  "trust",
 ]);
 
 /** True if a schedule tool_call would mutate state (vs a read like list/history). */
@@ -52,18 +112,12 @@ export class PrivilegeGuard {
       if (!tier || tier === "mutate") return;
 
       const name = event.toolName;
+      const lower = name.toLowerCase();
       const scheduleMut = isScheduleMutation(
         event as { toolName: string; input?: unknown },
       );
 
       if (tier === "read_only") {
-        if (MUTATE_TOOLS.has(name)) {
-          return {
-            block: true,
-            terminate: true,
-            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=read_only`,
-          };
-        }
         if (scheduleMut) {
           return {
             block: true,
@@ -73,14 +127,49 @@ export class PrivilegeGuard {
             terminate: true,
           };
         }
-        return;
-      }
-      if (tier === "suggest") {
-        if (SUGGEST_BLOCK.has(name)) {
+        if (MUTATE_TOOLS.has(lower)) {
           return {
             block: true,
             terminate: true,
-            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=suggest (no shell)`,
+            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=read_only`,
+          };
+        }
+        if (PEER_TOOLS.has(lower)) {
+          return {
+            block: true,
+            terminate: true,
+            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=read_only (peer messaging can drive other agents)`,
+          };
+        }
+        if (
+          privilegeMode() === "strict" &&
+          lower !== "schedule" &&
+          !READ_ONLY_ALLOW_TOOLS.has(lower)
+        ) {
+          return {
+            block: true,
+            terminate: true,
+            reason:
+              `[pi-schedule] blocked ${name}: active scheduled job is tier=read_only, and ` +
+              `${name} is not on the read-only allowlist (unknown tools fail closed). ` +
+              `Set PI_SCHEDULE_PRIVILEGE_MODE=legacy to relax to the core-tool blocklist.`,
+          };
+        }
+        return;
+      }
+      if (tier === "suggest") {
+        if (SUGGEST_BLOCK.has(lower)) {
+          return {
+            block: true,
+            terminate: true,
+            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=suggest (no shell/exec)`,
+          };
+        }
+        if (PEER_TOOLS.has(lower)) {
+          return {
+            block: true,
+            terminate: true,
+            reason: `[pi-schedule] blocked ${name}: active scheduled job is tier=suggest (peer messaging can drive other agents)`,
           };
         }
         if (scheduleMut) {

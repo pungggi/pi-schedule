@@ -8,8 +8,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
-import { PrivilegeGuard } from "../src/privilege.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { PrivilegeGuard, privilegeMode } from "../src/privilege.js";
 
 type BlockResult =
   | { block?: boolean; reason?: string; terminate?: boolean }
@@ -189,5 +189,119 @@ describe("PrivilegeGuard tier enforcement", () => {
     expect(guard.depth()).toBe(16); // MAX_DEPTH
     // Still functional: a bash call is blocked under the capped read_only stack.
     // (covered implicitly by the tier tests; depth is the contract here.)
+  });
+});
+
+describe("PrivilegeGuard — strict read_only allowlist (P2 fix)", () => {
+  afterEach(() => {
+    delete process.env["PI_SCHEDULE_PRIVILEGE_MODE"];
+  });
+
+  it("strict (default): unknown tools fail closed", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    for (const name of [
+      "terminal_exec",
+      "terminal_write_file",
+      "mcp",
+      "some_new_extension_tool",
+      "agent_send",
+    ]) {
+      const res = await call(name);
+      expect(res?.block, name).toBe(true);
+      expect(res?.terminate, name).toBe(true);
+      expect(res?.reason, name).toContain("read_only");
+    }
+  });
+
+  it("strict: known read tools and schedule reads stay allowed", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    for (const name of [
+      "read",
+      "grep",
+      "glob",
+      "find",
+      "web_search",
+      "web_read",
+      "auggie_codebase-retrieval",
+      "list_peers",
+      "show_file",
+      "show_image",
+      "terminal_read",
+      "terminal_list",
+    ]) {
+      expect(await call(name), name).toBeUndefined();
+    }
+    expect(await call("schedule", { action: "history" })).toBeUndefined();
+  });
+
+  it("strict blocks mention the escape hatch", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    const res = await call("terminal_exec");
+    expect(res?.reason).toContain("PI_SCHEDULE_PRIVILEGE_MODE=legacy");
+  });
+
+  it("legacy mode: unknown tools allowed again, core blocklist still enforced", async () => {
+    process.env["PI_SCHEDULE_PRIVILEGE_MODE"] = "legacy";
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    expect(await call("terminal_exec")).toBeUndefined();
+    expect(await call("mcp")).toBeUndefined();
+    for (const name of MUTATE_TOOLS) {
+      expect((await call(name))?.block, name).toBe(true);
+    }
+    // peer messaging stays blocked even in legacy mode
+    expect((await call("agent_send"))?.block).toBe(true);
+  });
+
+  it("peer messaging is blocked under read_only and suggest (both modes)", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    for (const name of ["agent_send", "agent_request"]) {
+      expect((await call(name))?.block, name).toBe(true);
+    }
+    guard.clear();
+    guard.enter("suggest");
+    for (const name of ["agent_send", "agent_request"]) {
+      expect((await call(name))?.block, name).toBe(true);
+    }
+  });
+
+  it("suggest blocks terminal exec/write surfaces but keeps drafting tools", async () => {
+    const { guard, call } = setup();
+    guard.enter("suggest");
+    for (const name of [
+      "bash",
+      "terminal_exec",
+      "terminal_write",
+      "terminal_write_file",
+      "terminal_run",
+      "terminal_start",
+      "terminal_tools", // loader: activates tools that run caller-supplied commands
+    ]) {
+      expect((await call(name))?.block, name).toBe(true);
+    }
+    expect(await call("edit")).toBeUndefined();
+    expect(await call("write")).toBeUndefined();
+    expect(await call("read")).toBeUndefined();
+  });
+
+  it("terminal_tools is blocked under read_only strict too (not on the allowlist)", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    expect((await call("terminal_tools"))?.block).toBe(true);
+    // read-only terminal inspection stays allowed
+    expect(await call("terminal_read")).toBeUndefined();
+    expect(await call("terminal_list")).toBeUndefined();
+    expect(await call("terminal_wait")).toBeUndefined();
+  });
+
+  it("tool names match case-insensitively (Bash/EDIT blocked too)", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    expect((await call("Bash"))?.block).toBe(true);
+    expect((await call("EDIT"))?.block).toBe(true);
   });
 });

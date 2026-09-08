@@ -60,6 +60,8 @@ export interface StorePaths {
   projectFile: (projectRoot: string) => string;
   runsFile: string;
   lockDir: string;
+  /** Project trust registry (see trust.ts). */
+  trustFile: string;
 }
 
 export function defaultPaths(home: string = homedir()): StorePaths {
@@ -70,6 +72,7 @@ export function defaultPaths(home: string = homedir()): StorePaths {
     projectFile: (projectRoot: string) => join(resolve(projectRoot), PROJECT_REL),
     runsFile: join(globalDir, "runs.jsonl"),
     lockDir: join(globalDir, "locks"),
+    trustFile: join(globalDir, "trusted.json"),
   };
 }
 
@@ -260,8 +263,11 @@ function readLockToken(lockPath: string): string | undefined {
  * over — never a fresh, active writer. Force-stealing a fresh lock would lose
  * concurrent RMW writes, which is exactly the race this lock exists to prevent.
  * Stale takeover uses rename (not unlink) so at most one racer claims the orphan.
+ *
+ * Exported for the run-ledger rotation (ledger.ts) — the same cross-process
+ * serialization applies to its read/rename compaction.
  */
-function withFileLock<T>(filePath: string, fn: () => T): T {
+export function withFileLock<T>(filePath: string, fn: () => T): T {
   const lockPath = `${filePath}.lock`;
   mkdirSync(dirname(lockPath), { recursive: true });
   const token = `${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`;
@@ -344,7 +350,16 @@ export class ScheduleStore {
     const projectFiltered = project.filter(
       (j) => !j.projectPath || resolve(j.projectPath) === projectRoot,
     );
-    return [...global, ...projectFiltered].map(normalizeJob);
+    // Provenance is which file a row was loaded from — not the row's own
+    // scope label. Rows in <cwd>/.pi/schedule.json are always project jobs
+    // of that root; otherwise a cloned repo could relabel a shell row as
+    // "global" and bypass the project trust gate (P1).
+    return [
+      ...global.map(normalizeJob),
+      ...projectFiltered.map((j) =>
+        normalizeJob({ ...j, scope: "project", projectPath: projectRoot }),
+      ),
+    ];
   }
 
   get(id: string, cwd: string): ScheduledJob | undefined {
