@@ -279,12 +279,23 @@ describe("PrivilegeGuard — strict read_only allowlist (P2 fix)", () => {
       "terminal_write_file",
       "terminal_run",
       "terminal_start",
+      "terminal_tools", // loader: activates tools that run caller-supplied commands
     ]) {
       expect((await call(name))?.block, name).toBe(true);
     }
     expect(await call("edit")).toBeUndefined();
     expect(await call("write")).toBeUndefined();
     expect(await call("read")).toBeUndefined();
+  });
+
+  it("terminal_tools is blocked under read_only strict too (not on the allowlist)", async () => {
+    const { guard, call } = setup();
+    guard.enter("read_only");
+    expect((await call("terminal_tools"))?.block).toBe(true);
+    // read-only terminal inspection stays allowed
+    expect(await call("terminal_read")).toBeUndefined();
+    expect(await call("terminal_list")).toBeUndefined();
+    expect(await call("terminal_wait")).toBeUndefined();
   });
 
   it("tool names match case-insensitively (Bash/EDIT blocked too)", async () => {

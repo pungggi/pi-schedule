@@ -42,6 +42,7 @@ const SUGGEST_BLOCK = new Set([
   "terminal_write_file",
   "terminal_run",
   "terminal_start",
+  "terminal_tools", // loader: activates terminal_retry/terminal_diff etc., which run caller-supplied commands
 ]);
 /** Peer messaging: an injected scheduled turn must not drive other agents. */
 const PEER_TOOLS = new Set(["agent_send", "agent_request"]);

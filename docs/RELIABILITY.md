@@ -141,8 +141,8 @@ is later replayed as a user message — a **stored-instruction persistence vecto
 
 | Tier | Prompt | Structural (`tool_call`) |
 |------|--------|---------------------------|
-| `read_only` | no mutations | **strict allowlist**: known read tools only; `edit`/`write`/`bash`, terminal tools, `mcp`, peer messaging, and unknown tools all fail closed (`PI_SCHEDULE_PRIVILEGE_MODE=legacy` → old core blocklist) |
-| `suggest` | drafts OK | blocks `bash` + terminal exec/write + peer messaging |
+| `read_only` | no mutations | **strict allowlist**: known read tools only (incl. read-only terminal inspection — `terminal_read`/`terminal_list`/`terminal_wait`); `edit`/`write`/`bash`, terminal *exec/write* tools (`terminal_exec`, `terminal_tools`, …), `mcp`, peer messaging, and unknown tools all fail closed (`PI_SCHEDULE_PRIVILEGE_MODE=legacy` → old core blocklist) |
+| `suggest` | drafts OK | blocks `bash` + terminal exec/write surfaces (incl. the `terminal_tools` loader) + peer messaging |
 | `mutate` | changes allowed | none |
 
 Why allowlist for `read_only`: a blocklist of core tools cannot cover the
