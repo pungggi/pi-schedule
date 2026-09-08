@@ -2,6 +2,13 @@
 
 Date: 2026-09-08 · Reviewer: agent (pi) · Scope: full source (`src/`, workflows, packaging, docs claims vs. behavior) · Baseline: `v0.3.6` (`a151e7b`), typecheck clean, 181/181 tests green.
 
+> **Status: ALL FINDINGS RESOLVED in 0.4.0** — P1 → #11, P2 → #12/#13, P3 →
+> #14/#15/#16. Follow-up Augment bot reviews added 13 more findings across the
+> fix PRs (incl. a `scope:"global"` trust-gate relabeling bypass and a
+> `terminal_tools` exec-loader gap); all fixed pre-merge. Master now at 247/247
+> tests. Still open by design: interactive confirm gate for shell/mutate
+> creates; command allowlists (see RELIABILITY.md §7 "Not yet").
+
 ## Threat model
 
 pi-schedule is a **persistent command-execution surface** attached to a coding
@@ -19,6 +26,8 @@ agent. The security-relevant questions are:
 ## Findings
 
 ### P1 · Untrusted project store file → arbitrary code execution at session start
+
+> **Resolved (#11):** trusted-projects gate (`~/.pi-schedule/trusted.json`, fail-closed) — auto waves only fire project jobs in trusted roots; `schedule action=trust` or interactive project-job create grants trust; fired turns cannot self-unlock; `run_now` is explicit and bypasses. Follow-up review finding (project row relabeled `scope:"global"`) also fixed — provenance is the file, not the label.
 
 **Where:** `src/store.ts` `listForCwd()` (reads `<cwd>/.pi/schedule.json`
 unconditionally), `src/runner.ts` `attach()`/`runWave()` (fires due jobs on
@@ -67,6 +76,8 @@ commands per start, plus ticker re-fires).
 
 ### P2 · Shell stdout/stderr injected into a mutate-tier turn without fence escaping
 
+> **Resolved (#12):** `defuseFences` (word-joiner between backticks of any 3+ run), ANSI CSI/OSC + C0/C1 control stripping, single-line headers, defused instructions, "output is untrusted data" contract line. Follow-up review finding (C1 8-bit introducers U+009B/U+009D) also fixed.
+
 **Where:** `src/prompt.ts` `buildShellFollowUpPrompt()` — `result.command`,
 `result.stdout`, `result.stderr` are embedded verbatim inside ``` fences;
 `src/action.ts` `forceTierMutate: true` (shell jobs always wake at `mutate`).
@@ -104,6 +115,8 @@ off for `mutate` by definition.
 
 ### P2 · Privilege tiers are a closed-world blocklist; non-core mutating tools bypass them
 
+> **Resolved (#13):** `read_only` now enforces a strict known-read allowlist — unknown tools fail closed; `mcp` excluded (gateway executes registered tools); peer messaging blocked under read_only+suggest; suggest blocks terminal exec/write surfaces incl. the `terminal_tools` loader (follow-up review finding); `PI_SCHEDULE_PRIVILEGE_MODE=legacy` escape hatch.
+
 **Where:** `src/privilege.ts` — `MUTATE_TOOLS = {edit, write, bash}`,
 `SUGGEST_BLOCK = {bash}`.
 
@@ -126,6 +139,8 @@ The tier label promises more than the mechanism enforces.
 
 ### P3 · Persistence amplification: compromised interactive turn → durable cross-project shell job
 
+> **Mitigated (#14):** create-time warning on every channel (UI notify / console / display-only session message) for `kind=shell`/`tier=mutate` creates, naming the blast radius and exact cancel command; notice itself hardened against ANSI-concealment (follow-up review finding). Hard confirm gate / allowlists remain open by design.
+
 **Where:** `src/tool.ts` `handleCreate()` (no confirmation for `kind=shell` or
 `scope=global`), `docs/RELIABILITY.md` §7 (documents the stored-instruction
 vector; tier enforcement is the stated mitigation).
@@ -145,6 +160,8 @@ as mutate in all sessions") in addition to fire time.
 
 ### P3 · Secrets persist in plaintext store and append-only ledger
 
+> **Mitigated (#15):** conservative redaction (Bearer/Basic/Digest, qualified env-style credential keys, well-known token shapes) on the persisted `lastShell` and transcript details — transient prompts keep full output; `runs.jsonl` rotates at 5 MB (UTF-8-byte-exact, locked). Follow-up review findings (Basic scheme, AWS_SECRET_ACCESS_KEY-style keys, rotation race/size) all fixed.
+
 **Where:** `src/store.ts` `markAttempt()` (persists `lastShell` incl. truncated
 stdout/stderr into `schedules.json`), `src/ledger.ts` (append-only
 `runs.jsonl`, never rotated, records error/detail text).
@@ -159,6 +176,8 @@ redacting common token patterns from persisted `lastShell`; add a size cap /
 rotation for `runs.jsonl`.
 
 ### P3 · Minor / robustness
+
+> **Resolved (#16):** non-object job rows and `null` store bodies quarantine properly (no raw TypeErrors); length caps with foreign-row clamping; `run_now` resolves via the calling ctx cwd; `notifyLabel` degrades to `unnamed` instead of leaking raw control chars. Follow-up review findings (JSON-null body, non-string `projectPath`) also fixed.
 
 - `readStoreFile()` on `{"version":1,"jobs":[null]}` throws a raw `TypeError`
   (`normalizeJob(null)` → `raw.action`) instead of taking the quarantine path —
