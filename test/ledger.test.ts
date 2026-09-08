@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -139,5 +139,65 @@ describe("RunLedger — eviction window", () => {
 
     expect(ledger.wasDelivered("early")).toBe(false); // aged out
     expect(ledger.wasDelivered(`k${MAX_HISTORY - 1}`)).toBe(true); // still in window
+  });
+});
+
+describe("RunLedger — rotation (P3 fix)", () => {
+  it("rotates in place once past maxBytes, keeping the newest lines", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-rot-"));
+    temps.push(dir);
+    const file = join(dir, "runs.jsonl");
+    const ledger = new RunLedger(file, 2_000); // tiny cap for the test
+
+    for (let i = 0; i < 60; i++) {
+      ledger.append(
+        buildRun({
+          jobId: `j${i}`,
+          jobName: `job-${i}`,
+          scope: "global",
+          idempotencyKey: `j${i}:t${i}`,
+          source: "tick",
+          status: "delivered",
+          startedAt: "2025-01-01T00:00:00.000Z",
+          endedAt: "2025-01-01T00:00:01.000Z",
+          tier: "read_only",
+          missedWindow: "catch_up_one",
+        }),
+      );
+    }
+
+    // file was rotated back under the cap and history still works
+    const size = statSync(file).size;
+    expect(size).toBeLessThanOrEqual(2_000);
+    const hist = ledger.history({ limit: 100 });
+    expect(hist.length).toBeGreaterThan(0);
+    // newest rows survived (history is newest-first)
+    expect(hist[0]?.jobId).toBe("j59");
+  });
+
+  it("rotation is transparent: appends keep working afterwards", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-rot2-"));
+    temps.push(dir);
+    const file = join(dir, "runs.jsonl");
+    const ledger = new RunLedger(file, 1_500);
+    for (let i = 0; i < 40; i++) {
+      expect(
+        ledger.append(
+          buildRun({
+            jobId: `x${i}`,
+            jobName: "n",
+            scope: "global",
+            idempotencyKey: `x${i}:t`,
+            source: "tick",
+            status: "delivered",
+            startedAt: "2025-01-01T00:00:00.000Z",
+            endedAt: "2025-01-01T00:00:01.000Z",
+            tier: "read_only",
+            missedWindow: "catch_up_one",
+          }),
+        ),
+      ).toBe(true);
+    }
+    expect(ledger.wasDelivered("x39:t")).toBe(true);
   });
 });

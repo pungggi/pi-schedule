@@ -523,6 +523,32 @@ describe("ScheduleRunner — action kinds", () => {
     expect(after.lastShell?.stdout).toContain("green");
   });
 
+  it("shell: persisted lastShell is redacted; the follow-up prompt keeps full output", async () => {
+    const token = `ghp_${"a".repeat(36)}`;
+    const h = makeHarness({
+      execResult: { stdout: `CI ok\ntoken: ${token}\n`, code: 0 },
+    });
+    const job = h.store.create({
+      name: "ci",
+      action: "shell",
+      command: "ci-status",
+      wakeOn: "always",
+      tier: "mutate",
+      schedule: parseSchedule("every 1h"),
+      scope: "global",
+    });
+    h.forceDue(job.id);
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    // follow-up prompt (transient) keeps the full output for the task
+    expect(h.sent[0]?.content).toContain(token);
+    // persisted store row is redacted
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastShell?.stdout).toContain("[REDACTED]");
+    expect(after.lastShell?.stdout).not.toContain(token);
+    expect(after.lastShell?.command).toBe("ci-status"); // command stays verbatim
+  });
+
   it("shell: honors PI_SCHEDULE_SHELL override for the shell binary", async () => {
     const prev = process.env["PI_SCHEDULE_SHELL"];
     process.env["PI_SCHEDULE_SHELL"] = "/custom/bin/bash";

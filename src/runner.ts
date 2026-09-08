@@ -40,6 +40,7 @@ import {
   buildShellFollowUpPrompt,
   notifyLabel,
 } from "./prompt.js";
+import { redactSecrets } from "./redact.js";
 import { StoreError, type ScheduleStore } from "./store.js";
 import type {
   FireSource,
@@ -489,12 +490,22 @@ export class ScheduleRunner {
       stderr: truncateOutput(execResult.stderr),
     };
 
+    // Persisted/transcript copy: redact credential-shaped output before it
+    // lands in schedules.json or the session transcript (both outlive the
+    // turn and are readable by any agent/user with file access). Command
+    // stays verbatim — it must re-run.
+    const persistedShell: ShellRunResult = {
+      ...lastShell,
+      stdout: redactSecrets(lastShell.stdout),
+      stderr: redactSecrets(lastShell.stderr),
+    };
+
     this.opts.pi.sendMessage?.(
       {
         customType: "pi-schedule",
         content: `Shell "${job.name}" exit ${lastShell.code}${lastShell.killed ? " (killed)" : ""}: ${command}`,
         display: true,
-        details: { jobId: job.id, action: "shell", runId: opts.runId, result: lastShell },
+        details: { jobId: job.id, action: "shell", runId: opts.runId, result: persistedShell },
       },
       { triggerTurn: false },
     );
@@ -508,7 +519,7 @@ export class ScheduleRunner {
           runId: opts.runId,
           source: opts.source,
           forced: opts.forced,
-          result: lastShell,
+          result: lastShell, // transient copy keeps full output for the task
           instruction,
         });
         await this.sendAgentMessage(body, ctx, opts.deliverAs);
@@ -516,8 +527,11 @@ export class ScheduleRunner {
       }
     }
 
+    // Persisted copy: redact credential-shaped output before it lands in
+    // schedules.json (outlives the session; readable by any agent/user with
+    // home access). Command stays verbatim — it must re-run.
     const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}`;
-    return { detail, wokeAgent, lastShell };
+    return { detail, wokeAgent, lastShell: persistedShell };
   }
 
   private async processOne(
