@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { RunLedger, buildRun } from "../src/ledger.js";
 import { ScheduleStore, defaultPaths } from "../src/store.js";
+import { TrustStore } from "../src/trust.js";
 import { parseSchedule } from "../src/schedule.js";
 import { _resetCreateLimiterForTests, registerScheduleTool } from "../src/tool.js";
 import type { ScheduleRunner } from "../src/runner.js";
@@ -46,7 +47,10 @@ function setup() {
   let runNowResult: ScheduledJob[] = [];
   const runner = {
     fireDue: async () => runNowResult,
+    scheduledTurnActive: () => false,
   } as unknown as ScheduleRunner;
+
+  const trust = new TrustStore(paths.trustFile);
 
   let tool: {
     execute: (
@@ -63,7 +67,7 @@ function setup() {
     },
   } as unknown as ExtensionAPI;
 
-  registerScheduleTool(pi, store, runner, ledger);
+  registerScheduleTool(pi, store, runner, ledger, trust);
 
   const exec = (params: Record<string, unknown>) =>
     tool!.execute("t1", params, undefined, undefined, { cwd: project });
@@ -87,6 +91,7 @@ function setup() {
     project,
     store,
     ledger,
+    trust,
     exec,
     seed,
     setRunNowResult: (r: ScheduledJob[]) => {
@@ -485,5 +490,60 @@ describe("schedule tool — not_found branches", () => {
     expect(
       text(await s.exec({ action: "disable", id: "ghost" }) as any),
     ).toContain("not found");
+  });
+});
+
+describe("schedule tool — project trust", () => {
+  it("trust action trusts the current project", async () => {
+    const s = setup();
+    expect(s.trust.isTrusted(s.project)).toBe(false);
+    expect(
+      text(await s.exec({ action: "trust" }) as any),
+    ).toContain("Trusted project");
+    expect(s.trust.isTrusted(s.project)).toBe(true);
+  });
+
+  it("creating a project-scope job auto-trusts the project (interactive turn)", async () => {
+    const s = setup();
+    expect(
+      text(
+        await s.exec({
+          action: "create",
+          name: "pj",
+          prompt: "p",
+          every: "1h",
+          scope: "project",
+        }) as any,
+      ),
+    ).toContain("Created job");
+    expect(s.trust.isTrusted(s.project)).toBe(true);
+  });
+
+  it("list marks project jobs in an untrusted project", async () => {
+    const s = setup();
+    s.store.create({
+      name: "foreign",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "project",
+      projectPath: s.project,
+    });
+    const out = text(await s.exec({ action: "list" }) as any);
+    expect(out).toContain("[untrusted-project");
+    expect(out).toContain("action=trust");
+  });
+
+  it("list shows no marker once the project is trusted", async () => {
+    const s = setup();
+    s.store.create({
+      name: "mine",
+      prompt: "p",
+      schedule: parseSchedule("every 1h"),
+      scope: "project",
+      projectPath: s.project,
+    });
+    s.trust.trust(s.project);
+    const out = text(await s.exec({ action: "list" }) as any);
+    expect(out).not.toContain("[untrusted-project");
   });
 });
