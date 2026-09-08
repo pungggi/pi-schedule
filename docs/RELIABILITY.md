@@ -201,6 +201,8 @@ project root is listed in `~/.pi-schedule/trusted.json`:
   its calling context (and fired `read_only`/`suggest` turns cannot call it).
 - The trust registry fails closed (unreadable/corrupt → untrusted).
 
+**High-privilege create notice (P3 fix):** creating a `kind=shell` or `tier=mutate` job is the highest-privilege act the tool offers — the job persists and fires unattended (global scope: every session). The tool now warns the human at **create time** via UI notify / console / display-only session message, including the command and the exact cancel instruction. The fire-time notify comes after execution, so create-time is the actionable one.
+
 **Not yet:** interactive confirm gate on `tier=mutate` / shell create; command allowlists. (The "custom tools not in the block list" gap is now closed for `read_only` by the strict allowlist; `suggest` remains blocklist-based by design.)
 
 ### 8. Self-spam / runaway scheduling
