@@ -162,6 +162,15 @@ ignored and blocks behave as before.
 but it is a real local-execution surface. Prefer narrow commands and
 `wakeOn=failure` so the agent only wakes with context when needed.
 
+**Untrusted-output embedding (P2 fix):** the shell follow-up prompt embeds
+command/stdout/stderr — often attacker-influenced (CI logs, fetched pages) —
+into an unattended mutate-tier turn. `buildShellFollowUpPrompt` therefore
+sanitizes everything it embeds: runs of 3+ backticks are defused with word
+joiners (payload can never close our fences and forge sections), ANSI/C0
+control characters are stripped, header fields (name, cwd) are collapsed to a
+single line (no header/section spoofing), and the contract states that command
+output is untrusted data, not instructions.
+
 **Schedule-tool escalation guard:** the `schedule` tool itself is in the
 privilege block list. A `read_only` or `suggest` fired turn **cannot** call
 `schedule` with `create`/`cancel`/`enable`/`disable`/`run_now`/`trust` — those persist
