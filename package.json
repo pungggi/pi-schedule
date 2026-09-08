@@ -1,6 +1,6 @@
 {
   "name": "pi-schedule",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "description": "Scheduled actions for pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
   "keywords": [
     "pi-package",
