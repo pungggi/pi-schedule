@@ -21,18 +21,22 @@
 const KNOWN_TOKEN_SHAPES =
   /\b(?:ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|ghu_[A-Za-z0-9]{36,}|ghs_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{10,}|rk_live_[A-Za-z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|eyJhbGciOi[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})\b/g;
 
-/** Bearer authorization headers. */
-const BEARER = /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi;
+/** Authorization headers: Bearer and Basic schemes. */
+const AUTH_SCHEME = /\b((?:Bearer|Basic|Digest)\s+)[A-Za-z0-9._~+/=-]{16,}/gi;
 
-/** Explicit assignments: api_key=…, "token": "…", password: …, etc. */
+/**
+ * Explicit assignments whose KEY mentions a credential word — matches both
+ * exact keys (`token=…`, `api_key: …`) and qualified env-style names
+ * (`AWS_SECRET_ACCESS_KEY=…`, `DATABASE_PASSWORD=…`, `GITHUB_TOKEN=…`).
+ */
 const ASSIGNMENT =
-  /\b((?:api[_-]?key|apikey|token|secret|password|passwd|authorization|client[_-]?secret|access[_-]?token|refresh[_-]?token)["']?\s*[:=]\s*)(["']?)[^\s"',;\\]{8,}\2/gi;
+  /\b([A-Za-z0-9_-]*(?:api[_-]?key|apikey|secret|token|password|passwd|credential|authorization)[A-Za-z0-9_-]*["']?\s*[:=]\s*)(["']?)[^\s"',;\\]{8,}\2/gi;
 
 /** Redact common credential shapes from text destined for disk. */
 export function redactSecrets(text: string): string {
   if (!text) return text;
   return text
-    .replace(BEARER, "$1[REDACTED]")
+    .replace(AUTH_SCHEME, "$1[REDACTED]")
     .replace(ASSIGNMENT, "$1$2[REDACTED]$2")
     .replace(KNOWN_TOKEN_SHAPES, "[REDACTED]");
 }

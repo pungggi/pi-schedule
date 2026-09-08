@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { withFileLock } from "./store.js";
 import type { JobRun, RunStatus } from "./types.js";
 
 /** Max JSONL lines retained in memory for history / secondary idempotency. */
@@ -50,23 +51,34 @@ export class RunLedger {
    * Best-effort append. Returns false on failure; never throws.
    * Callers must advance store state independently of ledger success.
    * Grows the append-only file only up to maxBytes, then rotates in place
-   * (keeps the newest ROTATE_KEEP_LINES lines) — forensic value without
-   * unbounded disk growth.
+   * (keeps the newest lines) — forensic value without unbounded disk growth.
    */
   append(run: JobRun): boolean {
     try {
       const dir = dirname(this.filePath);
       mkdirSync(dir, { recursive: true });
-      appendFileSync(this.filePath, `${JSON.stringify(run)}\n`, "utf8");
-      this.maybeRotate();
+      // Serialize append+rotate against other processes: the rotation is a
+      // read-modify-rename, so an unlocked append landing between the read
+      // and the rename would be silently dropped by the rotating process.
+      withFileLock(this.filePath, () => {
+        appendFileSync(this.filePath, `${JSON.stringify(run)}\n`, "utf8");
+        this.maybeRotateLocked();
+      });
       return true;
     } catch {
       return false;
     }
   }
 
-  /** Size-capped rewrite keeping the newest lines; best-effort, never throws. */
-  private maybeRotate(): void {
+  /**
+   * Size-capped rewrite keeping the newest lines; best-effort, never throws.
+   * MUST be called while holding the file lock (see append).
+   *
+   * Bounds by UTF-8 bytes (not UTF-16 code units). If even the single newest
+   * line exceeds the byte target, the file is rotated to empty — the cap
+   * promise holds, and the next append re-adds the current row.
+   */
+  private maybeRotateLocked(): void {
     try {
       if (!existsSync(this.filePath)) return;
       if (statSync(this.filePath).size <= this.maxBytes) return;
@@ -78,8 +90,8 @@ export class RunLedger {
       let bytes = 0;
       for (let i = lines.length - 1; i >= 0 && keep.length < ROTATE_KEEP_LINES; i--) {
         const line = lines[i]!;
-        const add = line.length + 1;
-        if (keep.length > 0 && bytes + add > targetBytes) break;
+        const add = Buffer.byteLength(line, "utf8") + 1;
+        if (bytes + add > targetBytes) break; // applies to the first line too
         keep.unshift(line);
         bytes += add;
       }

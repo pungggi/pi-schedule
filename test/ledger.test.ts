@@ -200,4 +200,75 @@ describe("RunLedger — rotation (P3 fix)", () => {
     }
     expect(ledger.wasDelivered("x39:t")).toBe(true);
   });
+
+  it("rotates to empty when a single row alone exceeds the byte target, then recovers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-rot3-"));
+    temps.push(dir);
+    const file = join(dir, "runs.jsonl");
+    const ledger = new RunLedger(file, 1_000);
+    // One pathological row bigger than the whole cap.
+    ledger.append(
+      buildRun({
+        jobId: "giant",
+        jobName: "G".repeat(3_000),
+        scope: "global",
+        idempotencyKey: "giant:t",
+        source: "tick",
+        status: "delivered",
+        startedAt: "2025-01-01T00:00:00.000Z",
+        endedAt: "2025-01-01T00:00:01.000Z",
+        tier: "read_only",
+        missedWindow: "catch_up_one",
+      }),
+    );
+    // Cap promise holds even for an oversized single row.
+    expect(statSync(file).size).toBeLessThanOrEqual(1_000);
+    // The next append recovers a usable ledger.
+    expect(
+      ledger.append(
+        buildRun({
+          jobId: "ok",
+          jobName: "n",
+          scope: "global",
+          idempotencyKey: "ok:t",
+          source: "tick",
+          status: "delivered",
+          startedAt: "2025-01-01T00:00:00.000Z",
+          endedAt: "2025-01-01T00:00:01.000Z",
+          tier: "read_only",
+          missedWindow: "catch_up_one",
+        }),
+      ),
+    ).toBe(true);
+    expect(ledger.wasDelivered("ok:t")).toBe(true);
+  });
+
+  it("bounds rotation by UTF-8 bytes, not UTF-16 code units", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-rot4-"));
+    temps.push(dir);
+    const file = join(dir, "runs.jsonl");
+    // Each CJK char is 3 UTF-8 bytes but 1 UTF-16 unit — a naive .length
+    // budget would keep ~3x more bytes than intended.
+    const ledger = new RunLedger(file, 2_000);
+    for (let i = 0; i < 30; i++) {
+      ledger.append(
+        buildRun({
+          jobId: `u${i}`,
+          jobName: "漢".repeat(60), // 180 UTF-8 bytes / 60 UTF-16 units
+          scope: "global",
+          idempotencyKey: `u${i}:t`,
+          source: "tick",
+          status: "delivered",
+          startedAt: "2025-01-01T00:00:00.000Z",
+          endedAt: "2025-01-01T00:00:01.000Z",
+          tier: "read_only",
+          missedWindow: "catch_up_one",
+        }),
+      );
+    }
+    expect(statSync(file).size).toBeLessThanOrEqual(2_000);
+    const hist = ledger.history({ limit: 100 });
+    expect(hist.length).toBeGreaterThan(0);
+    expect(hist[0]?.jobId).toBe("u29");
+  });
 });

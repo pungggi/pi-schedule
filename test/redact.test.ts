@@ -37,6 +37,31 @@ describe("redactSecrets", () => {
     );
   });
 
+  it("redacts Basic and Digest authorization schemes", () => {
+    expect(redactSecrets(`Authorization: Basic ${"YWJjZGVm".repeat(3)}`)).toBe(
+      "Authorization: Basic [REDACTED]",
+    );
+    expect(redactSecrets(`Authorization: Digest ${"ab".repeat(16)}`)).toBe(
+      "Authorization: Digest [REDACTED]",
+    );
+  });
+
+  it("redacts qualified env-style credential keys", () => {
+    const value = "wJal".repeat(6); // 24 chars, shared by all cases
+    const cases = [
+      `AWS_SECRET_ACCESS_KEY=${value}`,
+      `DATABASE_PASSWORD=${value}`,
+      `GITHUB_TOKEN=${value}`,
+      `MY_API_KEY=${value}`,
+      `refresh_token=${value}`,
+    ];
+    for (const c of cases) {
+      const out = redactSecrets(c);
+      expect(out, c).toContain("[REDACTED]");
+      expect(out, c).not.toContain(value); // the credential value is gone
+    }
+  });
+
   it("redacts explicit assignments in headers, JSON, and CLI forms", () => {
     expect(redactSecrets(`api_key=${"0".repeat(16)}`)).toBe(
       "api_key=[REDACTED]",
