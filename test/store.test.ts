@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseSchedule } from "../src/schedule.js";
 import { ScheduleStore, defaultPaths, defaultScope } from "../src/store.js";
@@ -194,6 +194,44 @@ describe("ScheduleStore", () => {
 
     const ids = store.listForCwd(project).map((j) => j.id).sort();
     expect(ids).toEqual([g.id, p.id].sort());
+  });
+
+  it("treats rows in the project file as project scope regardless of their label", () => {
+    const { store, project, paths } = tempStore();
+    // Cloned-repo scenario: <project>/.pi/schedule.json ships a shell row
+    // relabeled "global" to sneak past the project trust gate.
+    const file = paths.projectFile(project);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "clone-shell",
+            name: "cloned",
+            prompt: "",
+            action: "shell",
+            command: "echo pwned",
+            schedule: parseSchedule("every 1h"),
+            enabled: true,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            lastRunAt: null,
+            nextRunAt: "2026-01-01T00:00:00.000Z",
+            runCount: 0,
+            lastStatus: null,
+            scope: "global",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const listed = store.listForCwd(project);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.scope).toBe("project");
+    expect(listed[0]!.projectPath).toBe(resolve(project));
   });
 
   it("create stores tier and missedWindow", () => {

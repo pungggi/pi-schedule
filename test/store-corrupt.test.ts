@@ -9,7 +9,7 @@ import {
   mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseSchedule } from "../src/schedule.js";
 import { ScheduleStore, StoreError, defaultPaths } from "../src/store.js";
@@ -241,13 +241,12 @@ describe("corrupt store quarantine — invalid rows (P3 robustness)", () => {
     );
     const store = new ScheduleStore(paths);
     // Previously threw TypeError from resolve(42); now the row loads with the
-    // bogus path dropped — and since the row lives in THIS project's file, it
-    // is served as this project's job (documented filter: no projectPath ⇒
-    // belongs to the file's project).
+    // bogus path dropped — and the project-file mapping pins it to this
+    // project's root (documented: provenance is the file, not the label).
     expect(() => store.listForCwd(project)).not.toThrow();
     const jobs = store.listForCwd(project);
     expect(jobs.map((j) => j.id)).toContain("pp42");
-    expect(jobs[0]?.projectPath).toBeUndefined();
+    expect(jobs[0]?.projectPath).toBe(resolve(project));
   });
 
   it("clamps over-length foreign rows on read (name/prompt/command)", () => {

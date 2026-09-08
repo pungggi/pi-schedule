@@ -7,6 +7,7 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
 import { Type } from "typebox";
 import {
   ActionError,
@@ -29,6 +30,7 @@ import {
 } from "./schedule.js";
 import type { ScheduleRunner } from "./runner.js";
 import { StoreError, defaultScope, type ScheduleStore } from "./store.js";
+import { TrustStore } from "./trust.js";
 import type {
   MissedWindowPolicy,
   PrivilegeTier,
@@ -45,6 +47,7 @@ const ScheduleParams = Type.Object({
     "disable",
     "run_now",
     "history",
+    "trust",
   ] as const),
   name: Type.Optional(Type.String({ description: "Job name (create)" })),
   /**
@@ -165,6 +168,7 @@ export function registerScheduleTool(
   store: ScheduleStore,
   runner: ScheduleRunner,
   ledger?: RunLedger,
+  trust: TrustStore = new TrustStore(store.pathsInfo().trustFile),
 ): void {
   const runLedger = ledger ?? new RunLedger(store.pathsInfo().runsFile);
 
@@ -173,12 +177,13 @@ export function registerScheduleTool(
     label: "Schedule",
     description:
       "Manage scheduled agent tasks and actions (reviews, polls, shell checks, reminders). " +
-      "Actions: create, list, cancel, enable, disable, run_now, history. " +
+      "Actions: create, list, cancel, enable, disable, run_now, history, trust. " +
       "Create kind: prompt (default) | shell | notify | message. " +
       'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
       "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on session start (unless pi was launched with an initial prompt) " +
-      "and while the session is open. See package docs/RELIABILITY.md.",
+      "and while the session is open. Project-scope jobs only auto-fire in trusted " +
+      "projects (action=trust trusts the current project). See package docs/RELIABILITY.md.",
     parameters: ScheduleParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -187,9 +192,9 @@ export function registerScheduleTool(
       try {
         switch (params.action) {
           case "create":
-            return handleCreate(store, params, cwd);
+            return handleCreate(store, params, cwd, ctx, pi, runner, trust);
           case "list":
-            return handleList(store, cwd);
+            return handleList(store, cwd, trust);
           case "cancel":
             return handleCancel(store, params.id, cwd);
           case "enable":
@@ -200,6 +205,8 @@ export function registerScheduleTool(
             return await handleRunNow(store, runner, params.id, cwd, ctx);
           case "history":
             return handleHistory(runLedger, params.id, params.limit);
+          case "trust":
+            return handleTrust(store, trust, cwd);
           default:
             return textResult(`Unknown action: ${String(params.action)}`, {
               error: "unknown_action",
@@ -240,6 +247,10 @@ function handleCreate(
     tier?: PrivilegeTier;
   },
   cwd: string,
+  ctx: ExtensionContext,
+  pi: ExtensionAPI,
+  runner: ScheduleRunner,
+  trust: TrustStore,
 ) {
   if (!createLimiter.tryTake()) {
     return textResult(
@@ -298,10 +309,19 @@ function handleCreate(
     tier,
   });
 
+  // Creating a job here is an explicit act in this project — trust it for
+  // auto-fire. Never auto-trust from a *scheduled* turn (a fired turn must
+  // not be able to unlock its own project's gate).
+  if (scope === "project" && !runner.scheduledTurnActive()) {
+    trust.trust(cwd);
+  }
+
   const shellBits =
     job.action === "shell"
       ? `  command=${JSON.stringify(job.command)}  wakeOn=${job.wakeOn}`
       : "";
+
+  notifyHighPrivilegeCreate(pi, ctx, job);
 
   return textResult(
     [
@@ -314,7 +334,74 @@ function handleCreate(
   );
 }
 
-function handleList(store: ScheduleStore, cwd: string) {
+/**
+ * P3 persistence-amplification mitigation: creating a shell or mutate job is
+ * the highest-privilege act this tool offers — the job persists across
+ * sessions and fires unattended (global scope: in every session). A
+ * prompt-injected turn could otherwise create one silently. Surface it to the
+ * human at *create* time (the fire-time notify comes after execution), on
+ * every channel available: UI notify, console, and a display-only session
+ * message. Never blocks — best-effort.
+ */
+function notifyHighPrivilegeCreate(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext | undefined,
+  job: ScheduledJob,
+): void {
+  const isShell = job.action === "shell";
+  const isMutate = job.tier === "mutate";
+  if (!isShell && !isMutate) return;
+
+  // The notice itself must survive a hostile name/command: control chars
+  // (incl. C1 8-bit CSI/OSC) could clear/reposition the terminal and conceal
+  // the very warning this mitigation exists to surface. Newlines collapse so
+  // the notice stays one line. JSON.stringify already escapes C0 in the
+  // command display; the extra pass catches C1.
+  const clean = (v: string): string =>
+    // eslint-disable-next-line no-control-regex
+    v
+      .replace(/[\u0000-\u001F\u007F\u0080-\u009F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const where =
+    job.scope === "global"
+      ? "every future session, in any project"
+      : "this project's future sessions";
+  const cmd = isShell
+    ? ` command=${clean(JSON.stringify(job.command))}`
+    : "";
+  const msg =
+    `[pi-schedule] created ${isShell ? "shell (runs as mutate)" : "prompt (tier=mutate)"} job "${clean(job.name)}" ` +
+    `— it will fire unattended in ${where}.${cmd} ` +
+    `If you did not expect this, cancel it: schedule action=cancel id=${job.id}`;
+
+  try {
+    if (ctx?.hasUI) ctx.ui.notify(msg, "warning");
+    else console.warn(msg);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    pi.sendMessage?.(
+      {
+        customType: "pi-schedule",
+        content: msg,
+        display: true,
+        details: { jobId: job.id, kind: "create-notice", scope: job.scope, tier: job.tier },
+      },
+      { triggerTurn: false },
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
+function handleList(
+  store: ScheduleStore,
+  cwd: string,
+  trust: TrustStore,
+) {
   const jobs = store.listForCwd(cwd);
   if (jobs.length === 0) {
     return textResult(
@@ -322,8 +409,35 @@ function handleList(store: ScheduleStore, cwd: string) {
       { jobs: [] },
     );
   }
-  const body = ["Scheduled jobs:", ...jobs.map((j) => summarize(j))].join("\n");
-  return textResult(body, { jobs });
+  const untrusted = jobs.filter(
+    (j) => j.scope === "project" && !trust.isTrusted(j.projectPath ?? cwd),
+  );
+  const body = [
+    "Scheduled jobs:",
+    ...jobs.map((j) =>
+      summarize(j) +
+      (untrusted.some((u) => u.id === j.id) ? "\n  [untrusted-project — will not auto-fire; schedule action=trust]" : ""),
+    ),
+  ];
+  if (untrusted.length > 0) {
+    body.push(
+      `\n${untrusted.length} project job(s) are in an untrusted project: they never auto-fire. ` +
+        `Inspect .pi/schedule.json first, then run schedule action=trust to allow auto-fire.`,
+    );
+  }
+  return textResult(body.join("\n"), { jobs });
+}
+
+function handleTrust(store: ScheduleStore, trust: TrustStore, cwd: string) {
+  trust.trust(cwd);
+  const projectJobs = store
+    .listForCwd(cwd)
+    .filter((j) => j.scope === "project");
+  return textResult(
+    `Trusted project ${resolve(cwd)}. ${projectJobs.length} project job(s) can now auto-fire when due. ` +
+      `(Only trust projects you have inspected: .pi/schedule.json can contain shell jobs.)`,
+    { trusted: resolve(cwd), projectJobs: projectJobs.length },
+  );
 }
 
 function handleCancel(store: ScheduleStore, id: string | undefined, cwd: string) {
