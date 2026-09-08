@@ -91,6 +91,18 @@ Shell jobs always store `tier=mutate` (command runs outside the agent tool path)
 
 A terminated job is disabled and excluded from due scans. `list` shows `[off/terminated:once]` or `[…:maxRuns]`.
 
+### Privilege enforcement (strict read_only)
+
+While a scheduled `read_only` turn is active, only a **known-read allowlist**
+of tools may run (`read`, `grep`, `web_search`, semantic search, display, …).
+Everything else — `bash`/`edit`/`write`, terminal tools, the `mcp` gateway,
+peer messaging, and any unknown tool — fails closed. This closes the gap
+where non-core mutating tools (e.g. `terminal_exec`) bypassed the old core
+blocklist. `PI_SCHEDULE_PRIVILEGE_MODE=legacy` restores the old blocklist
+({edit, write, bash} only) if your scheduled tasks need non-core read tools.
+`suggest` blocks exec surfaces (`bash`, `terminal_*`) and peer messaging but
+keeps drafting tools open; `mutate` blocks nothing.
+
 ### Examples
 
 ```text
