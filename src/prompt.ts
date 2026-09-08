@@ -121,9 +121,12 @@ export function buildShellFollowUpPrompt(input: ShellFollowUpInput): string {
 export function notifyLabel(job: ScheduledJob): string {
   // Strip control chars (ANSI escapes can spoof/clear the terminal when a
   // hostile project file supplies the name/prompt) and collapse newlines.
+  // Never fall back to the raw (unsanitized) value — an all-control name
+  // degrades to "unnamed" instead of leaking the original.
   const clean = (v: string | undefined): string =>
     // eslint-disable-next-line no-control-regex
     (v ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
-  const body = clean(job.prompt) || clean(job.name) || job.name;
-  return `[pi-schedule] ${clean(job.name)}: ${body}`;
+  const name = clean(job.name) || "unnamed";
+  const body = clean(job.prompt) || name;
+  return `[pi-schedule] ${name}: ${body}`;
 }

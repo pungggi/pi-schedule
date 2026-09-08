@@ -94,6 +94,11 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
   // Foreign rows may carry non-string fields despite the type; coerce safely.
   const asStr = (v: unknown, fallback = ""): string =>
     typeof v === "string" ? v : fallback;
+  // A non-string projectPath would crash resolve() downstream; drop it.
+  const projectPath =
+    typeof raw.projectPath === "string" && raw.projectPath
+      ? raw.projectPath
+      : undefined;
   const wakeOn = raw.wakeOn !== undefined && isWakeOn(raw.wakeOn) ? raw.wakeOn : undefined;
   const timeoutMs =
     raw.timeoutMs !== undefined &&
@@ -116,6 +121,7 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
     successPrompt: clamp(asStr(raw.successPrompt) || undefined, LIMITS.maxPromptChars),
     failurePrompt: clamp(asStr(raw.failurePrompt) || undefined, LIMITS.maxPromptChars),
     wakeOn,
+    projectPath,
     timeoutMs,
     maxRuns,
     terminated: raw.terminated ?? null,
@@ -167,6 +173,11 @@ function readStoreFile(filePath: string): ScheduleStoreFile {
     parsed = JSON.parse(raw) as Partial<ScheduleStoreFile>;
   } catch {
     quarantineAndThrow(filePath, "invalid JSON");
+  }
+
+  // JSON "null" / primitives parse fine but are not store objects.
+  if (typeof parsed !== "object" || parsed === null) {
+    quarantineAndThrow(filePath, "not a store object");
   }
 
   if (parsed.version !== STORE_VERSION) {

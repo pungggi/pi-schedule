@@ -190,6 +190,66 @@ describe("corrupt store quarantine — invalid rows (P3 robustness)", () => {
     }
   });
 
+  it("quarantines a JSON `null` / primitive store body (not a raw TypeError)", () => {
+    for (const bad of ["null", "42", '"text"']) {
+      const root = mkdtempSync(join(tmpdir(), "pi-sched-corrupt-null-"));
+      temps.push(root);
+      const home = join(root, "home");
+      const paths = defaultPaths(home);
+      mkdirSync(paths.globalDir, { recursive: true });
+      writeFileSync(paths.globalFile, bad, "utf8");
+      const store = new ScheduleStore(paths);
+      try {
+        store.listForCwd(root);
+        expect.unreachable("must throw StoreError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(StoreError);
+        expect((err as StoreError).message).toContain("not a store object");
+      }
+    }
+  });
+
+  it("coerces a non-string projectPath instead of crashing resolve()", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sched-coerce-"));
+    temps.push(root);
+    const home = join(root, "home");
+    const project = join(root, "proj");
+    mkdirSync(join(project, ".pi"), { recursive: true });
+    const paths = defaultPaths(home);
+    const base = {
+      id: "pp42",
+      name: "weird",
+      prompt: "p",
+      action: "prompt",
+      projectPath: 42, // hostile row: non-string path
+      schedule: { type: "interval", everyMs: 3_600_000, every: "1h" },
+      scope: "project",
+      enabled: true,
+      missedWindow: "catch_up_one",
+      tier: "read_only",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      lastRunAt: null,
+      nextRunAt: "2025-01-02T00:00:00.000Z",
+      runCount: 0,
+      lastStatus: null,
+    };
+    writeFileSync(
+      join(project, ".pi", "schedule.json"),
+      JSON.stringify({ version: 1, jobs: [base] }),
+      "utf8",
+    );
+    const store = new ScheduleStore(paths);
+    // Previously threw TypeError from resolve(42); now the row loads with the
+    // bogus path dropped — and since the row lives in THIS project's file, it
+    // is served as this project's job (documented filter: no projectPath ⇒
+    // belongs to the file's project).
+    expect(() => store.listForCwd(project)).not.toThrow();
+    const jobs = store.listForCwd(project);
+    expect(jobs.map((j) => j.id)).toContain("pp42");
+    expect(jobs[0]?.projectPath).toBeUndefined();
+  });
+
   it("clamps over-length foreign rows on read (name/prompt/command)", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-sched-clamp-"));
     temps.push(root);

@@ -119,4 +119,12 @@ describe("notifyLabel sanitization (P3 robustness)", () => {
     expect(label).not.toContain("\n");
     expect(label).toContain("[pi-schedule]");
   });
+
+  it("an all-control name degrades to 'unnamed' — never the raw value", () => {
+    const evil = "\u0007\u001b";
+    const label = notifyLabel({ ...base, name: evil, prompt: "" });
+    expect(label).not.toContain("\u0007");
+    expect(label).not.toContain("\u001b");
+    expect(label).toContain("unnamed");
+  });
 });
