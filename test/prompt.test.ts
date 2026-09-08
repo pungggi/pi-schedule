@@ -127,6 +127,16 @@ describe("untrusted-text sanitization (P2 fence breakout)", () => {
     expect(stripControlChars("nul\u0000bell\u0007del\u007F")).toBe("nulbelldel");
   });
 
+  it("stripControlChars removes C1 controls incl. 8-bit CSI/OSC introducers (U+009B/U+009D)", () => {
+    // 8-bit introducers accepted by ECMA-48-capable consumers.
+    expect(stripControlChars("\u009B31mred")).toBe("31mred");
+    expect(stripControlChars("x\u009Dy")).toBe("xy");
+    // the whole C1 block goes
+    expect(stripControlChars("\u0080\u0085\u009Fgone")).toBe("gone");
+    // NBSP (U+00A0) and printable Latin-1 are NOT controls — preserved
+    expect(stripControlChars("café\u00A0naïve")).toBe("café\u00A0naïve");
+  });
+
   const result: ShellRunResult = {
     ok: false,
     command: "gh run view --log",

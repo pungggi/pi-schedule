@@ -37,7 +37,11 @@ export function stripControlChars(s: string): string {
   return s
     .replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "") // CSI: ESC [ … final
     .replace(/\u001B\][^\u0007\u001B]*(\u0007|\u001B\\)?/g, "") // OSC: ESC ] … BEL/ST
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+    // C0 (U+0000–U+001F minus \t\n\r), DEL (U+007F), and C1 (U+0080–U+009F)
+    // — C1 includes the 8-bit CSI/OSC introducers U+009B/U+009D that some
+    // ECMA-48 consumers accept directly.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]/g, "");
 }
 
 /** Sanitize text embedded as a fenced block (keep newlines, defuse fences). */
