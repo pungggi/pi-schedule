@@ -96,6 +96,12 @@ A terminated job is disabled and excluded from due scans. `list` shows `[off/ter
 
 ### Privilege enforcement (strict read_only)
 
+The privilege fence covers exactly the **scheduled turn**: it arms when the
+fired `[scheduled-task]` prompt becomes the active user message and stands
+down when that agent run settles (or a user message takes over). The calling
+interactive turn is never fenced — a mid-turn `run_now` no longer blocks the
+caller's own `bash`/`edit`/`write`.
+
 While a scheduled `read_only` turn is active, only a **known-read allowlist**
 of tools may run (`read`, `grep`, `web_search`, semantic search, display, and
 read-only terminal inspection — `terminal_read`/`terminal_list`/
@@ -109,6 +115,14 @@ blocklist. `PI_SCHEDULE_PRIVILEGE_MODE=legacy` restores the old blocklist
 `suggest` blocks exec surfaces (`bash`, `terminal_*` including the
 `terminal_tools` loader) and peer messaging but keeps drafting tools open;
 `mutate` blocks nothing.
+
+### Run history closes the loop
+
+Each agent-turn fire writes two ledger rows under one `runId`: `delivered`
+when the prompt is sent, then `ok` (`turn settled`) when the fired turn's run
+settles. `schedule action=history` collapses them, so a run's latest state is
+always visible — verify a `run_now` end-to-end by watching the row flip
+`delivered → ok`.
 
 ### Examples
 

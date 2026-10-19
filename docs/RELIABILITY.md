@@ -128,9 +128,16 @@ errors into fluent false digests; ~70% of silent failures found by humans.
 
 Query via tool: `schedule action=history [id=…] [limit=10]`.
 
-**Honest limitation:** `delivered` means the action ran (prompt injected, shell
-finished, notify/message shown) — not that the agent completed a task correctly.
-Shell exit codes are recorded in `detail` / `lastShell`; agent outcome verification is future work.
+**Completion accounting (v0.5):** agent-turn fires append a second row under
+the same `runId` — status `ok`, detail `turn settled` — when the fired turn's
+agent run settles. `history` collapses rows per `runId` (newest status wins),
+so the loop visibly closes `delivered → ok`; `wasDelivered` still reads the
+raw `delivered` receipts for at-most-once idempotency.
+
+**Honest limitation:** `ok` (turn settled) means the fired agent turn ran to
+completion — not that the task was done *correctly*. Shell exit codes are
+recorded in `detail` / `lastShell`; deeper agent-outcome verification is
+future work.
 
 ### 7. Privilege / blast radius / self-persistence
 
@@ -153,8 +160,20 @@ fail closed; the allowlist is the source of truth (`READ_ONLY_ALLOW_TOOLS` in
 `src/privilege.ts`). `mcp` is deliberately excluded: a name-level allow
 cannot tell a read from a write behind the gateway.
 
-Privilege enters **only when an agent turn starts** (prompt jobs, or shell jobs
-that wake). `notify` / `message` / quiet shell runs do not push the stack.
+The fence covers exactly the **scheduled turn**: it arms when the fired
+`[scheduled-task]` prompt becomes the active user message (`message_start`,
+runId matched against this session's delivery registry — a forged header
+cannot arm it) and stands down when the agent run settles or a non-scheduled
+user message takes over. Agent-turn fires only (prompt jobs, or shell jobs
+that wake); `notify` / `message` / quiet shell runs never arm the fence.
+
+Why not arm at delivery time (v0.4 regression, fixed in v0.5): pi emits ONE
+`agent_settled` per agent *run* — one `prompt()` plus all its drained followUp
+continuations. A per-delivery push/pop stack therefore (a) fenced the tail of
+the calling interactive turn after a mid-turn `run_now` — blocking, with
+`terminate`, the caller's own `bash` — and (b) leaked N−1 tiers on every
+multi-fire wave (N pushes, 1 pop), pinning `read_only` session-wide. The
+single-slot fence keyed by runId cannot leak: every settle clears it.
 
 **Early terminate (pi ≥ 0.84.1):** privilege blocks also set `terminate: true`
 on the `tool_call` result. A scheduled `read_only`/`suggest` turn that attempts

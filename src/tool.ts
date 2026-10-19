@@ -518,15 +518,23 @@ async function handleRunNow(
 
   const kind = updated.action ?? "prompt";
   switch (updated.lastStatus) {
-    case "ok":
+    case "ok": {
+      // Prompt (and shell-wake) deliveries start an agent turn; the job row
+      // does not record whether a shell job actually woke, so state the
+      // settle-flip only where it is certain: prompt kind.
+      const startsTurn = kind === "prompt";
       return textResult(
         `Delivered job ${updated.id} "${updated.name}" (kind=${kind}, tier=${updated.tier}).` +
           (updated.lastShell
             ? ` shell exit=${updated.lastShell.code}.`
             : "") +
+          (startsTurn
+            ? ` The scheduled turn runs as the next agent turn with tier=${updated.tier}; its history row flips delivered→ok once it settles.`
+            : "") +
           ` Check schedule action=history id=${updated.id}.`,
         { job: updated, status: "ok" },
       );
+    }
     case "locked":
       return textResult(
         `Job ${updated.id} "${updated.name}" is locked (already running). Not delivered.`,

@@ -106,6 +106,8 @@ export class RunLedger {
   /**
    * True if this idempotency key already has a successful delivery
    * within the recent history window (MAX_HISTORY lines).
+   * Reads raw rows (no runId collapsing) — the delivery receipt is what
+   * matters for at-most-once, even when a later completion row exists.
    */
   wasDelivered(idempotencyKey: string): boolean {
     for (const run of this.readRecent()) {
@@ -116,14 +118,29 @@ export class RunLedger {
     return false;
   }
 
-  /** Recent runs, newest first, optionally filtered by jobId. */
+  /**
+   * Recent runs, newest first, optionally filtered by jobId.
+   * Collapses per runId (a fire appends a `delivered` row at send time and
+   * an `ok` completion row when its turn settles) keeping the NEWEST status,
+   * so history shows each run once at its latest state.
+   */
   history(opts: { jobId?: string; limit?: number } = {}): JobRun[] {
     const limit = opts.limit ?? 20;
     const all = this.readRecent();
     const filtered = opts.jobId
       ? all.filter((r) => r.jobId === opts.jobId)
       : all;
-    return filtered.slice(0, limit);
+    const seenRunIds = new Set<string>();
+    const out: JobRun[] = [];
+    for (const run of filtered) {
+      if (run.runId) {
+        if (seenRunIds.has(run.runId)) continue;
+        seenRunIds.add(run.runId);
+      }
+      out.push(run);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   private readRecent(): JobRun[] {

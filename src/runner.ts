@@ -34,7 +34,7 @@ import {
   decideDue,
   idempotencyKeyFor,
 } from "./policy.js";
-import { PrivilegeGuard } from "./privilege.js";
+import { PrivilegeGuard, type SettledFire } from "./privilege.js";
 import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
@@ -168,6 +168,9 @@ export class ScheduleRunner {
   attach(): void {
     const { pi } = this.opts;
     this.privilege.attach(pi);
+    // Completion accounting: when a fired agent turn's run settles, append a
+    // ledger row so history closes the loop delivered → ok.
+    this.privilege.onFireSettled = (fire) => this.recordFireCompletion(fire);
 
     pi.on("session_start", async (event, ctx) => {
       this.cwd = ctx.cwd;
@@ -225,9 +228,31 @@ export class ScheduleRunner {
     return this.runWave(ctx, meta);
   }
 
-  /** True while a scheduled delivery is the active agent turn (privilege stack non-empty). */
+  /** True while a scheduled delivery is the active agent turn (privilege fence armed). */
   scheduledTurnActive(): boolean {
-    return this.privilege.depth() > 0;
+    return this.privilege.fenceActive();
+  }
+
+  /** Append the completion ledger row for a settled fire (best-effort, never throws). */
+  private recordFireCompletion(fire: SettledFire): void {
+    const meta = fire.meta;
+    if (!meta) return;
+    this.recordBestEffort({
+      runId: fire.runId,
+      jobId: meta.jobId,
+      jobName: meta.jobName,
+      scope: meta.scope,
+      projectPath: meta.projectPath,
+      idempotencyKey: meta.idempotencyKey,
+      source: meta.source,
+      status: "ok",
+      startedAt: meta.firedAt,
+      endedAt: this.now().toISOString(),
+      detail: "turn settled",
+      tier: meta.tier,
+      missedWindow: meta.missedWindow,
+      action: meta.action,
+    });
   }
 
   /**
@@ -721,9 +746,22 @@ export class ScheduleRunner {
         deliverAs: opts.deliverAs,
       });
 
-      // Structural tier enforcement only when an agent turn was started.
+      // Structural tier enforcement: register the fire; the fence arms only
+      // when this runId's prompt actually starts a turn (message_start), so
+      // the calling interactive turn (e.g. a mid-turn run_now) is unaffected.
       if (delivery.wokeAgent) {
-        this.privilege.enter(fresh.tier ?? tier);
+        this.privilege.register(runId, fresh.tier ?? tier, {
+          jobId: fresh.id,
+          jobName: fresh.name,
+          scope: fresh.scope,
+          projectPath: fresh.projectPath,
+          idempotencyKey: opts.forced ? key : freshKey,
+          source: opts.source,
+          tier: fresh.tier ?? tier,
+          missedWindow: fresh.missedWindow ?? missedWindow,
+          action: freshAction,
+          firedAt: this.now().toISOString(),
+        });
       }
 
       // Advance store FIRST (durable). Ledger is best-effort and must not

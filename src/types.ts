@@ -79,7 +79,8 @@ export type JobStatus = "ok" | "error" | "skipped" | "locked" | null;
 
 /** Per-run ledger status (append-only forensic trail). */
 export type RunStatus =
-  | "delivered"
+  | "delivered" // fire prompt sent (delivery receipt, written at send time)
+  | "ok" // fired agent turn settled (completion receipt, appended on settle)
   | "error"
   | "skipped"
   | "locked";
@@ -196,6 +197,22 @@ export interface JobRun {
   missedWindow: MissedWindowPolicy;
   /** Job action that fired (prompt/shell/…). */
   action?: JobAction;
+}
+
+/** A fired agent turn settled — everything needed to append its completion ledger row. */
+export interface FireCompletionMeta {
+  jobId: string;
+  jobName: string;
+  scope: ScheduleScope;
+  projectPath?: string;
+  /** Same key as the delivery row (forced runs use their force key). */
+  idempotencyKey: string;
+  source: FireSource;
+  tier: PrivilegeTier;
+  missedWindow: MissedWindowPolicy;
+  action: JobAction;
+  /** ISO timestamp of the delivery (turn-start proxy for the completion row). */
+  firedAt: string;
 }
 
 export interface DueDecision {

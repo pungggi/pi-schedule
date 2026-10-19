@@ -43,7 +43,9 @@ Two consequences shape every decision below:
 2. **Privilege is enforced structurally**, not just by wording. A fired turn
    literally cannot call the blocked tools (see the tier table). So pick the
    tier by what the task *actually needs to run*, not by vibe. Quiet shell /
-   notify / message fires never enter the privilege stack.
+   notify / message fires never arm the privilege fence. The fence covers
+   only the scheduled turn itself — calling `run_now` from an interactive
+   turn does not restrict that interactive turn.
 
 Firing triggers: on **session start** when due (skipped if pi was launched
 with an initial prompt, e.g. `pi "fix the bug"`), and every **30s** while a
@@ -234,6 +236,8 @@ schedule action=create name="standup-prep"
   - `schedule action=run_now id=<id>` — fires once immediately and reports the
     **actual** status (`ok` / `locked` / `error` / `skipped`), never fake success.
   - `schedule action=history id=<id>` — append-only forensic trail of past runs.
+    Agent-turn runs show `delivered` when the prompt is sent and flip to `ok`
+    once the scheduled turn settles (one collapsed row per run).
   - `schedule action=list` — current jobs, next/last run, run count, last status.
 - **Privilege failures are silent-ish.** If a `read_only` job tries to run
   `bash`, the call is blocked and the run likely errors. Check `history` if a

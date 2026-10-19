@@ -232,18 +232,28 @@ function makeHarness(opts: HarnessOpts = {}) {
 type H = ReturnType<typeof makeHarness>;
 
 describe("ScheduleRunner — delivery", () => {
-  it("fires a due job once: message + privilege.enter + advance + ledger", async () => {
+  it("fires a due job once: message + fence lifecycle + advance + ledger", async () => {
     const h = makeHarness();
     const job = h.createGlobal();
     h.forceDue(job.id);
+    h.runner.attach(); // registers the guard's message_start/settle hooks
 
     await h.runner.fireDue(h.ctx, { source: "session_start" });
 
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]?.content).toContain("[scheduled-task]");
     expect(h.sent[0]?.content).toContain("PRIVILEGE: read_only");
-    // privilege entered for the turn; not yet settled
-    expect(h.privilege.depth()).toBe(1);
+    // v0.5: the fire is REGISTERED but the fence is not armed yet — it arms
+    // only when the prompt's message_start lands (regression: delivery-time
+    // enter used to fence the calling interactive turn).
+    expect(h.privilege.pendingCount()).toBe(1);
+    expect(h.privilege.fenceActive()).toBe(false);
+
+    // Simulate the fired turn starting: fence arms, tool calls are enforced.
+    await h.emit("message_start", {
+      message: { role: "user", content: h.sent[0]?.content },
+    });
+    expect(h.privilege.fenceActive()).toBe(true);
 
     const after = h.store.get(job.id, h.project)!;
     expect(after.runCount).toBe(1);
@@ -304,7 +314,8 @@ describe("ScheduleRunner — project trust gate", () => {
     await h.runner.fireDue(h.ctx, { source: "tick" });
 
     expect(h.sent).toHaveLength(0);
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.fenceActive()).toBe(false);
+    expect(h.privilege.pendingCount()).toBe(0);
     const after = h.store.get(job.id, h.project)!;
     expect(after.lastStatus).toBeNull();
     expect(after.runCount).toBe(0);
@@ -639,7 +650,7 @@ describe("ScheduleRunner — action kinds", () => {
     await h.runner.fireDue(h.ctx, { source: "session_start" });
 
     expect(h.sent).toHaveLength(0);
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.pendingCount()).toBe(0);
     expect(h.notifies.some((m) => m.includes("stretch") && m.includes("stand up"))).toBe(
       true,
     );
@@ -660,7 +671,7 @@ describe("ScheduleRunner — action kinds", () => {
     await h.runner.fireDue(h.ctx, { source: "session_start" });
 
     expect(h.sent).toHaveLength(0);
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.pendingCount()).toBe(0);
     expect(h.customMessages.some((m) => m.content.includes("context for later"))).toBe(
       true,
     );
@@ -687,7 +698,7 @@ describe("ScheduleRunner — action kinds", () => {
     expect(h.execCalls[0]?.command).toBe(resolveShell());
     expect(h.execCalls[0]?.args).toEqual(["-lc", "glab ci view"]);
     expect(h.sent).toHaveLength(0);
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.pendingCount()).toBe(0);
     const after = h.store.get(job.id, h.project)!;
     expect(after.lastStatus).toBe("ok");
     expect(after.lastShell?.code).toBe(0);
@@ -767,7 +778,7 @@ describe("ScheduleRunner — action kinds", () => {
     expect(h.sent[0]?.content).toContain("shellStatus: failure");
     expect(h.sent[0]?.content).toContain("Inspect the pipeline failure");
     expect(h.sent[0]?.content).toContain("exitCode: 2");
-    expect(h.privilege.depth()).toBe(1);
+    expect(h.privilege.pendingCount()).toBe(1);
   });
 
   it("shell: does not wake on success when wakeOn=failure", async () => {
@@ -785,7 +796,7 @@ describe("ScheduleRunner — action kinds", () => {
     h.forceDue(job.id);
     await h.runner.fireDue(h.ctx, { source: "session_start" });
     expect(h.sent).toHaveLength(0);
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.pendingCount()).toBe(0);
   });
 
   it("shell: records error when exec throws", async () => {
@@ -821,7 +832,7 @@ describe("ScheduleRunner — action kinds", () => {
     await h.runner.fireDue(h.ctx, { source: "session_start" });
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]?.content).toContain("shellStatus: success");
-    expect(h.privilege.depth()).toBe(1);
+    expect(h.privilege.pendingCount()).toBe(1);
   });
 
   it("shell wakeOn=always with no follow-up text uses generic review prompt", async () => {
@@ -1002,9 +1013,20 @@ describe("ScheduleRunner — review P2 follow-ups", () => {
     const h = makeHarness();
     const job = h.createGlobal("guard", "read_only");
     h.forceDue(job.id);
-    h.runner.attach(); // registers the privilege tool_call hook
+    h.runner.attach(); // registers the privilege + settle hooks
     await h.emit("session_start", { type: "session_start", reason: "new" });
-    expect(h.privilege.depth()).toBe(1); // read_only pushed by the fire
+
+    // Delivery registered the fire, but the fence is DOWN until the fire
+    // prompt's turn actually starts — the interactive tail stays free.
+    expect(h.privilege.pendingCount()).toBe(1);
+    expect(h.privilege.fenceActive()).toBe(false);
+    expect(await h.toolCall("bash")).toBeUndefined();
+
+    // The fired turn starts (message_start of the injected prompt).
+    await h.emit("message_start", {
+      message: { role: "user", content: h.sent[0]?.content },
+    });
+    expect(h.privilege.fenceActive()).toBe(true);
 
     // bash is blocked and the batch is told to terminate (off-contract).
     const blocked = await h.toolCall("bash");
@@ -1019,7 +1041,45 @@ describe("ScheduleRunner — review P2 follow-ups", () => {
     ).toBe(true);
 
     await h.emit("session_shutdown");
-    expect(h.privilege.depth()).toBe(0);
+    expect(h.privilege.fenceActive()).toBe(false);
+  });
+
+  it("completion accounting: settle flips the ledger row delivered→ok (same runId)", async () => {
+    const h = makeHarness();
+    const job = h.createGlobal("traced", "read_only");
+    h.forceDue(job.id);
+    h.runner.attach();
+    await h.emit("session_start", { type: "session_start", reason: "new" });
+    expect(h.sent).toHaveLength(1);
+
+    const runId = /runId: ([0-9a-f]{16})/.exec(h.sent[0]?.content ?? "")?.[1];
+    expect(runId).toBeTruthy();
+
+    // Before the turn runs: exactly the delivery receipt.
+    const delivered = h.ledger.history({ jobId: job.id });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.status).toBe("delivered");
+
+    // Turn starts and settles.
+    await h.emit("message_start", {
+      message: { role: "user", content: h.sent[0]?.content },
+    });
+    await h.emit("agent_settled", { type: "agent_settled" });
+
+    // History collapses per runId: one row, now status ok (loop closed).
+    const rows = h.ledger.history({ jobId: job.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("ok");
+    expect(rows[0]?.runId).toBe(runId);
+    expect(rows[0]?.detail).toBe("turn settled");
+    // The raw receipt row is still there for at-most-once idempotency.
+    expect(
+      h.ledger.history({ jobId: job.id, limit: 50 }).some(
+        (r) => r.status === "delivered",
+      ),
+    ).toBe(false); // collapsed out of history view (wasDelivered reads raw rows)
+
+    await h.emit("session_shutdown");
   });
 });
 

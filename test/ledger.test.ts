@@ -43,6 +43,44 @@ describe("RunLedger", () => {
     expect(hist[0]?.status).toBe("delivered");
   });
 
+  it("history collapses delivered→ok rows per runId, keeping the newest status", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-"));
+    temps.push(dir);
+    const ledger = new RunLedger(join(dir, "runs.jsonl"));
+
+    const delivered = buildRun({
+      runId: "abc123def4567890",
+      jobId: "j1",
+      jobName: "n",
+      scope: "global",
+      idempotencyKey: "j1:t1",
+      source: "run_now",
+      status: "delivered",
+      startedAt: "2025-01-01T00:00:00.000Z",
+      endedAt: "2025-01-01T00:00:01.000Z",
+      tier: "read_only",
+      missedWindow: "catch_up_one",
+      action: "prompt",
+    });
+    ledger.append(delivered);
+    // Completion row: same runId, appended when the fired turn settles.
+    ledger.append({
+      ...delivered,
+      status: "ok",
+      endedAt: "2025-01-01T00:00:42.000Z",
+      detail: "turn settled",
+    });
+
+    const rows = ledger.history({ jobId: "j1" });
+    expect(rows).toHaveLength(1); // collapsed, newest wins
+    expect(rows[0]?.status).toBe("ok");
+    expect(rows[0]?.runId).toBe("abc123def4567890");
+    expect(rows[0]?.detail).toBe("turn settled");
+
+    // At-most-once still sees the raw delivery receipt underneath the collapse.
+    expect(ledger.wasDelivered("j1:t1")).toBe(true);
+  });
+
   it("does not treat skipped as delivered", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-sched-ledger-"));
     temps.push(dir);

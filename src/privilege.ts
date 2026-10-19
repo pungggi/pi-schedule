@@ -2,7 +2,23 @@
  * Structural privilege enforcement for scheduled turns.
  *
  * Uses pi's tool_call hook to block mutating tools while a read_only/suggest
- * scheduled delivery is the active agent turn (until agent_settled).
+ * scheduled delivery is the active agent turn.
+ *
+ * Fence window (v0.5): the fence activates when the fire prompt itself
+ * becomes the active user message (`message_start` of the
+ * `[scheduled-task]\nrunId: …` header) and deactivates when the agent run
+ * settles (`agent_settled`) or a non-scheduled user message takes over the
+ * loop. It does NOT activate at delivery time: registering at send time
+ * fenced the tail of the calling interactive turn (a mid-turn `run_now`
+ * blocked — and terminate-ended — the caller's own bash), and because pi
+ * emits exactly ONE `agent_settled` per agent RUN (one `prompt()` plus all
+ * its drained followUp continuations), a per-delivery stack leaked N−1 tiers
+ * on every multi-fire wave, pinning read_only session-wide.
+ *
+ * Activation is keyed by runId, matched against deliveries this session
+ * actually registered — a hand-typed `[scheduled-task]` message cannot
+ * escalate anything (it can only suppress a stale fence, i.e. relax toward
+ * the interactive default).
  *
  * read_only is enforced **strict** (default): a known-read allowlist — any
  * tool not on it is blocked. A blocklist of core tools ({edit,write,bash})
@@ -20,8 +36,7 @@
  * follow-up model call. The batch semantics protect mixed batches — if the
  * same batch also ran allowed read tools (which don't set terminate), the turn
  * continues so the agent can still report findings in text. No scheduled turn
- * active → no block, so interactive turns are unaffected. On pi < 0.84.1 the
- * extra `terminate` field is ignored and blocks behave as before.
+ * active → no block, so interactive turns are unaffected.
  *
  * Critical: `schedule` is itself a mutating surface. A read_only/suggest fired
  * turn must NOT be able to persist a `kind=shell` job (or any state change),
@@ -31,7 +46,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { PrivilegeTier } from "./types.js";
+import { firePromptRunId } from "./prompt.js";
+import type { FireCompletionMeta, PrivilegeTier } from "./types.js";
 
 const MUTATE_TOOLS = new Set(["edit", "write", "bash"]);
 /** Arbitrary-execution surfaces blocked under suggest (drafting tools stay open). */
@@ -97,18 +113,74 @@ const SCHEDULE_MUTATE_ACTIONS = new Set([
 
 /** True if a schedule tool_call would mutate state (vs a read like list/history). */
 function isScheduleMutation(event: { toolName: string; input?: unknown }): boolean {
-  if (event.toolName !== "schedule") return false;
   const action = (event.input as { action?: unknown } | undefined)?.action;
-  return typeof action === "string" && SCHEDULE_MUTATE_ACTIONS.has(action);
+  return (
+    event.toolName === "schedule" &&
+    typeof action === "string" &&
+    SCHEDULE_MUTATE_ACTIONS.has(action)
+  );
+}
+
+/** A fire that was delivered but whose prompt has not started a turn yet. */
+interface PendingFire {
+  tier: PrivilegeTier;
+  meta?: FireCompletionMeta;
+  registeredAt: number;
+}
+
+/** Delivered to {@link PrivilegeGuard.onFireSettled} when a fired turn's run settles. */
+export interface SettledFire {
+  runId: string;
+  tier: PrivilegeTier;
+  meta?: FireCompletionMeta;
+}
+
+/** Max pending registrations (delivered, turn not started yet). Safety valve. */
+export const MAX_PENDING = 32;
+/** Pending registrations older than this are pruned (fire never started: cleared queue, dead session). */
+export const PENDING_TTL_MS = 10 * 60_000;
+
+/** Extract the prompt text from a user message content (string or content parts). */
+function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const p of content) {
+    if (
+      p &&
+      typeof p === "object" &&
+      (p as { type?: string }).type === "text" &&
+      typeof (p as { text?: unknown }).text === "string"
+    ) {
+      parts.push((p as { text: string }).text);
+    }
+  }
+  return parts.join("\n");
 }
 
 export class PrivilegeGuard {
-  /** Stack of active scheduled-turn tiers (supports multi-fire followUps). */
-  private stack: PrivilegeTier[] = [];
+  /** Delivered, awaiting their prompt's `message_start`. Keyed by runId. */
+  private pending = new Map<string, PendingFire>();
+  /** Fires whose prompt started a turn this agent run. Keyed by runId. */
+  private active = new Map<string, PendingFire>();
+  /**
+   * True after a non-scheduled user message started a turn: interactive
+   * input drives the loop now, so the fence stands down even though the
+   * fired run has not settled yet (completion accounting still waits for
+   * `agent_settled`). A later fire `message_start` re-arms the fence.
+   */
+  private suppressed = false;
+  /** Optional completion-accounting hook (runner appends the ledger row). */
+  onFireSettled?: (fire: SettledFire) => void;
+  private readonly now: () => number;
+
+  constructor(now: () => number = () => Date.now()) {
+    this.now = now;
+  }
 
   attach(pi: ExtensionAPI): void {
     pi.on("tool_call", async (event) => {
-      const tier = this.stack[this.stack.length - 1];
+      const tier = this.fenceTier();
       if (!tier || tier === "mutate") return;
 
       const name = event.toolName;
@@ -186,39 +258,100 @@ export class PrivilegeGuard {
       return;
     });
 
+    // Fence activation: the fire prompt itself becomes the active user
+    // message. Real user prompts have role "user"; pi-schedule's own custom
+    // messages (notify/shell transcripts) carry role "custom" and are ignored,
+    // so they neither arm nor suppress the fence.
+    pi.on("message_start", async (event) => {
+      const message = (
+        event as { message?: { role?: unknown; content?: unknown } }
+      ).message;
+      if (!message || message.role !== "user") return;
+
+      const runId = firePromptRunId(userMessageText(message.content));
+      const fire = runId ? this.pending.get(runId) : undefined;
+      if (fire && runId) {
+        this.pending.delete(runId);
+        this.active.set(runId, fire);
+        this.suppressed = false; // our fire drives the loop again
+        return;
+      }
+      // Any other user message takes over the loop → stand the fence down.
+      // (Also covers a [scheduled-task]-shaped message we did not deliver:
+      // transcript replay or hand-typed — it gets interactive privileges.)
+      this.suppressed = true;
+    });
+
     pi.on("agent_settled", async () => {
-      // Host invariant: pi fires exactly one `agent_settled` per agent turn
-      // (scheduled fire OR interactive user turn), one turn at a time. So one
-      // settle pops at most one scheduled tier. If the invariant ever breaks
-      // (double/no settle on a future pi build), enter() caps growth at
-      // MAX_DEPTH as a safety valve.
-      if (this.stack.length > 0) this.stack.pop();
+      // pi fires exactly one agent_settled per agent RUN (a prompt() plus all
+      // drained followUp continuations), so a run may carry several fired
+      // turns — emit a completion event for each, then clear the fence.
+      if (this.active.size > 0 && this.onFireSettled) {
+        for (const [runId, fire] of this.active) {
+          try {
+            this.onFireSettled({ runId, tier: fire.tier, meta: fire.meta });
+          } catch {
+            // completion accounting is best-effort; never break the settle path
+          }
+        }
+      }
+      this.active.clear();
+      this.suppressed = false;
+      this.prunePending();
     });
   }
 
   /**
-   * Defensive ceiling. The stack should mirror in-flight scheduled turns
-   * (depth > 1 only for stacked follow-ups). If it grows past this, the host
-   * invariant — exactly one `agent_settled` per fired turn — is not holding
-   * (settles not firing, or firing without a matching enter). Trim oldest-first
-   * so a leaked read_only/suggest can't pin privilege indefinitely.
+   * Register a delivered fire. The fence arms only when this runId's prompt
+   * actually starts a turn (message_start) — never at delivery time, so the
+   * calling interactive turn (e.g. the turn that called run_now) is unaffected.
    */
-  private static readonly MAX_DEPTH = 16;
-
-  /** Call after successfully injecting a scheduled prompt. */
-  enter(tier: PrivilegeTier): void {
-    while (this.stack.length >= PrivilegeGuard.MAX_DEPTH) {
-      this.stack.shift();
+  register(runId: string, tier: PrivilegeTier, meta?: FireCompletionMeta): void {
+    this.prunePending();
+    while (this.pending.size >= MAX_PENDING) {
+      const oldest = this.pending.keys().next().value;
+      if (oldest === undefined) break;
+      this.pending.delete(oldest);
     }
-    this.stack.push(tier);
+    this.pending.set(runId, { tier, meta, registeredAt: this.now() });
+  }
+
+  /** Drop registrations that never started a turn within the TTL. */
+  private prunePending(): void {
+    const cutoff = this.now() - PENDING_TTL_MS;
+    for (const [runId, fire] of this.pending) {
+      if (fire.registeredAt < cutoff) this.pending.delete(runId);
+    }
+  }
+
+  /** Tier of the most recently started fire, or null when the fence is down. */
+  fenceTier(): PrivilegeTier | null {
+    if (this.suppressed || this.active.size === 0) return null;
+    let tier: PrivilegeTier | null = null;
+    // Map iterates in start order; the last-started fire drives the current turn.
+    for (const fire of this.active.values()) tier = fire.tier;
+    return tier;
+  }
+
+  /** True while a scheduled fire is the active turn (privilege fence armed). */
+  fenceActive(): boolean {
+    return this.fenceTier() !== null;
+  }
+
+  /** Number of delivered fires whose prompt has not started a turn yet. */
+  pendingCount(): number {
+    return this.pending.size;
+  }
+
+  /** Number of fires whose turn started in the current (unsettled) agent run. */
+  activeFireCount(): number {
+    return this.active.size;
   }
 
   /** Test hook / emergency clear. */
   clear(): void {
-    this.stack = [];
-  }
-
-  depth(): number {
-    return this.stack.length;
+    this.pending.clear();
+    this.active.clear();
+    this.suppressed = false;
   }
 }

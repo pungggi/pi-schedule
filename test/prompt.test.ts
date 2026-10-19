@@ -3,6 +3,7 @@ import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
   defuseFences,
+  firePromptRunId,
   notifyLabel,
   stripControlChars,
 } from "../src/prompt.js";
@@ -27,6 +28,47 @@ const base: ScheduledJob = {
   runCount: 0,
   lastStatus: null,
 };
+
+describe("firePromptRunId (fence activation marker)", () => {
+  it("extracts the runId from a prompt fire header", () => {
+    const text = buildFirePrompt({ job: base, runId: "0123456789abcdef", source: "tick" });
+    expect(firePromptRunId(text)).toBe("0123456789abcdef");
+  });
+
+  it("extracts the runId from a shell follow-up fire header", () => {
+    const text = buildShellFollowUpPrompt({
+      job: base,
+      runId: "fedcba9876543210",
+      source: "tick",
+      result: {
+        ok: false,
+        command: "npm test",
+        cwd: "/repo",
+        timeoutMs: 60_000,
+        code: 1,
+        killed: false,
+        stdout: "",
+        stderr: "boom",
+      },
+      instruction: "Inspect the failure.",
+    });
+    expect(firePromptRunId(text)).toBe("fedcba9876543210");
+  });
+
+  it("rejects plain text and markers not at the very start", () => {
+    expect(firePromptRunId("just a task")).toBeNull();
+    expect(
+      firePromptRunId(`do things\n\n[scheduled-task]\nrunId: 0123456789abcdef\n`),
+    ).toBeNull();
+  });
+
+  it("rejects malformed runIds (must be 16 lowercase hex)", () => {
+    expect(firePromptRunId(`[scheduled-task]\nrunId: xyz\n`)).toBeNull();
+    expect(
+      firePromptRunId(`[scheduled-task]\nrunId: 0123456789ABCDEF\n`),
+    ).toBeNull();
+  });
+});
 
 describe("buildFirePrompt", () => {
   it("includes isolation contract and privilege", () => {
