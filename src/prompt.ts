@@ -190,3 +190,22 @@ export function notifyLabel(job: ScheduledJob): string {
   const body = clean(job.prompt) || name;
   return `[pi-schedule] ${name}: ${body}`;
 }
+
+/**
+ * Notice shown when a due job is downgraded to a notify because its origin
+ * session is gone and several sessions are open — so no surprise agent turn
+ * lands in an arbitrary session. Names the job and how to run it by hand.
+ */
+export function downgradeNotice(job: ScheduledJob): string {
+  // Same control-char stripping as notifyLabel: names/prompts can come from
+  // an untrusted project file.
+  const clean = (v: string | undefined): string =>
+    // eslint-disable-next-line no-control-regex
+    (v ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  const name = clean(job.name) || "unnamed";
+  return (
+    `[pi-schedule] "${name}" came due, but the session that created it is gone ` +
+    `and multiple sessions are open — not starting an agent turn here. ` +
+    `Run it in whichever session you want with: schedule action=run_now id=${job.id}`
+  );
+}

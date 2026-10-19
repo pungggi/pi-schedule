@@ -25,8 +25,11 @@ import {
   truncateOutput,
 } from "./action.js";
 import { shouldSkipDueOnSessionStart } from "./cli-prompt.js";
+import { type DeliveryRole, decideDelivery } from "./delivery.js";
 import { RunLedger, buildRun, newRunId } from "./ledger.js";
 import { JobLockManager } from "./lock.js";
+import { SessionPresence } from "./presence.js";
+import { sessionIdOf } from "./session.js";
 import {
   DEFAULT_MISSED_WINDOW,
   DEFAULT_TIER,
@@ -38,6 +41,7 @@ import { PrivilegeGuard, type SettledFire } from "./privilege.js";
 import {
   buildFirePrompt,
   buildShellFollowUpPrompt,
+  downgradeNotice,
   notifyLabel,
 } from "./prompt.js";
 import { redactSecrets } from "./redact.js";
@@ -117,6 +121,8 @@ export interface RunnerOptions {
   privilege?: PrivilegeGuard;
   /** Project trust registry gating auto-fire of project-scope jobs. */
   trust?: TrustStore;
+  /** Live-session presence registry (origin-first delivery). */
+  presence?: SessionPresence;
   hasInitialPrompt?: () => boolean;
   now?: () => Date;
   tickMs?: number;
@@ -131,6 +137,8 @@ export interface RunnerOptions {
 export class ScheduleRunner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cwd = process.cwd();
+  /** This session's id, learned at session_start (undefined on old pi). */
+  private selfSessionId: string | undefined;
   private waveActive = false;
   /** Serializes waves so run_now waits instead of silently no-oping. */
   private waveChain: Promise<unknown> = Promise.resolve();
@@ -148,6 +156,7 @@ export class ScheduleRunner {
   private readonly locks: JobLockManager;
   private readonly privilege: PrivilegeGuard;
   private readonly trust: TrustStore;
+  private readonly presence: SessionPresence;
 
   constructor(private readonly opts: RunnerOptions) {
     this.hasInitialPrompt = opts.hasInitialPrompt;
@@ -162,6 +171,7 @@ export class ScheduleRunner {
     this.locks = opts.locks ?? new JobLockManager(paths.lockDir);
     this.privilege = opts.privilege ?? new PrivilegeGuard();
     this.trust = opts.trust ?? new TrustStore(paths.trustFile);
+    this.presence = opts.presence ?? new SessionPresence(paths.presenceDir);
   }
 
   /** Bind session lifecycle + privilege hooks. Call once from extension factory. */
@@ -174,6 +184,8 @@ export class ScheduleRunner {
 
     pi.on("session_start", async (event, ctx) => {
       this.cwd = ctx.cwd;
+      this.selfSessionId = sessionIdOf(ctx);
+      this.markPresent();
       this.stopTicker();
       this.compacting = false; // fresh session cannot be mid-compaction
 
@@ -203,7 +215,13 @@ export class ScheduleRunner {
       this.stopTicker();
       this.privilege.clear();
       this.compacting = false;
+      if (this.selfSessionId) this.presence.remove(this.selfSessionId);
     });
+  }
+
+  /** Refresh this session's heartbeat (best-effort; no-op without an id). */
+  private markPresent(): void {
+    if (this.selfSessionId) this.presence.heartbeat(this.selfSessionId, this.cwd);
   }
 
   /**
@@ -266,6 +284,25 @@ export class ScheduleRunner {
     if (job.scope !== "project") return true;
     const root = job.projectPath ?? ctx.cwd ?? this.cwd;
     return this.trust.isTrusted(root);
+  }
+
+  /**
+   * Which role should THIS session play for a due job (origin-first ladder,
+   * see delivery.ts)? Returns "turn" when the session id is unknown (old pi /
+   * tests) so behavior degrades to today's single-flight delivery.
+   */
+  private deliveryRole(ctx: ExtensionContext, job: ScheduledJob): DeliveryRole {
+    const selfId = sessionIdOf(ctx) ?? this.selfSessionId;
+    if (!selfId) return "turn";
+    const aliveSessionIds =
+      job.scope === "project"
+        ? this.presence.aliveForProject(job.projectPath ?? ctx.cwd ?? this.cwd)
+        : this.presence.aliveForGlobal();
+    return decideDelivery({
+      selfSessionId: selfId,
+      originSessionId: job.originSessionId,
+      aliveSessionIds,
+    });
   }
 
   private async runWave(
@@ -482,9 +519,29 @@ export class ScheduleRunner {
       source: FireSource;
       forced: boolean;
       deliverAs?: "followUp" | "steer";
+      role?: DeliveryRole;
     },
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
+
+    // Elected-owner downgrade: the origin session is gone and several sessions
+    // are open. Agent-turn kinds are demoted to a notify so no surprise turn
+    // lands here; display-only kinds (notify/message) are unaffected.
+    if (opts.role === "notify" && action === "prompt") {
+      const msg = downgradeNotice(job);
+      if (ctx.hasUI) ctx.ui.notify(msg, "info");
+      else console.log(msg);
+      this.opts.pi.sendMessage?.(
+        {
+          customType: "pi-schedule",
+          content: msg,
+          display: true,
+          details: { jobId: job.id, action: "notify", runId: opts.runId, downgraded: "prompt" },
+        },
+        { triggerTurn: false },
+      );
+      return { detail: "notify (origin absent; owner)", wokeAgent: false };
+    }
 
     if (action === "notify") {
       const msg = notifyLabel(job);
@@ -524,7 +581,10 @@ export class ScheduleRunner {
     }
 
     if (action === "shell") {
-      return this.deliverShell(ctx, job, opts);
+      return this.deliverShell(ctx, job, {
+        ...opts,
+        suppressWake: opts.role === "notify",
+      });
     }
 
     // prompt (default)
@@ -546,6 +606,8 @@ export class ScheduleRunner {
       source: FireSource;
       forced: boolean;
       deliverAs?: "followUp" | "steer";
+      /** Elected-owner downgrade: run the command but do not wake the agent. */
+      suppressWake?: boolean;
     },
   ): Promise<{ detail?: string; wokeAgent: boolean; lastShell?: ShellRunResult }> {
     const command = job.command?.trim();
@@ -603,26 +665,38 @@ export class ScheduleRunner {
     );
 
     let wokeAgent = false;
+    let wakeSuppressed = false;
     if (shouldWakeForShell(job, lastShell)) {
       const instruction = selectShellFollowUp(job, lastShell);
       if (instruction) {
-        const body = buildShellFollowUpPrompt({
-          job,
-          runId: opts.runId,
-          source: opts.source,
-          forced: opts.forced,
-          result: lastShell, // transient copy keeps full output for the task
-          instruction,
-        });
-        await this.sendAgentMessage(body, ctx, opts.deliverAs);
-        wokeAgent = true;
+        if (opts.suppressWake) {
+          // Origin gone + several sessions open: the command still ran (once,
+          // under the lock), but we notify instead of injecting a turn into an
+          // arbitrary session. The persisted shell result above lets any
+          // session pick it up with run_now.
+          const msg = downgradeNotice(job);
+          if (ctx.hasUI) ctx.ui.notify(msg, "info");
+          else console.log(msg);
+          wakeSuppressed = true;
+        } else {
+          const body = buildShellFollowUpPrompt({
+            job,
+            runId: opts.runId,
+            source: opts.source,
+            forced: opts.forced,
+            result: lastShell, // transient copy keeps full output for the task
+            instruction,
+          });
+          await this.sendAgentMessage(body, ctx, opts.deliverAs);
+          wokeAgent = true;
+        }
       }
     }
 
     // Persisted copy: redact credential-shaped output before it lands in
     // schedules.json (outlives the session; readable by any agent/user with
     // home access). Command stays verbatim — it must re-run.
-    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}`;
+    const detail = `shell exit=${lastShell.code}${lastShell.killed ? " killed" : ""}${wokeAgent ? " woke" : ""}${wakeSuppressed ? " woke-suppressed" : ""}`;
     return { detail, wokeAgent, lastShell: persistedShell };
   }
 
@@ -646,6 +720,17 @@ export class ScheduleRunner {
     const tier = job.tier ?? DEFAULT_TIER;
     const missedWindow = job.missedWindow ?? DEFAULT_MISSED_WINDOW;
     const action: JobAction = job.action ?? DEFAULT_JOB_ACTION;
+
+    // Origin-first delivery ladder. run_now is an explicit act in THIS session
+    // and always delivers a full turn here; auto waves route to the origin
+    // session (or an elected owner as a notify) so a due job never barges into
+    // an arbitrary session. A deferring session is a complete no-op for this
+    // job — no lock, no ledger, no schedule advance — leaving all bookkeeping
+    // to the eligible session.
+    const role: DeliveryRole = opts.forced
+      ? "turn"
+      : this.deliveryRole(ctx, job);
+    if (role === "defer") return null;
 
     // Pre-lock idempotency (cheap).
     if (!opts.forced && this.alreadyDelivered(job, key)) {
@@ -744,6 +829,7 @@ export class ScheduleRunner {
         source: opts.source,
         forced: opts.forced,
         deliverAs: opts.deliverAs,
+        role,
       });
 
       // Structural tier enforcement: register the fire; the fence arms only
@@ -842,6 +928,9 @@ export class ScheduleRunner {
   private startTicker(ctx: ExtensionContext): void {
     this.stopTicker();
     this.timer = setInterval(() => {
+      // Heartbeat every tick regardless of idle/busy so a session mid-turn
+      // still counts as alive (origin routing must not expire a busy origin).
+      this.markPresent();
       void this.fireDue(ctx, { source: "tick" });
     }, this.tickMs);
     this.timer.unref?.();

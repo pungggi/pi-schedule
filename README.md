@@ -176,6 +176,34 @@ schedule action=cancel id=abc123def456
 5. **`run_now`**: attempts force delivery; tool reports **actual** status (`ok` / `locked` / `error`), never invents success.
 6. **Locks + ledger**: O_EXCL file lock + idempotency key; forensic trail in `~/.pi-schedule/runs.jsonl`.
 
+### Origin-first delivery (multi-session projects)
+
+A due job is evaluated inside every live session on the project. Without
+routing, whichever session's ticker fires first wins the lock and the agent
+turn lands there — confusing when you have several sessions open on one
+project and a scheduled prompt barges into unrelated work. The **origin-first
+ladder** targets delivery instead:
+
+1. **Origin session alive** — the session that *created* the job (recorded as
+   `originSessionId`) delivers the full agent turn; every other session
+   defers (a complete no-op — no lock, no ledger, no schedule advance).
+2. **Origin gone, lone session** — the single remaining session delivers the
+   full turn (one session is never the confusing case).
+3. **Origin gone, several sessions open** — one owner is elected
+   deterministically (smallest live session id) and receives a **notify**
+   (`schedule action=run_now id=…`) instead of a surprise turn; the rest
+   defer. Shell jobs still run their command once (under the lock) but the
+   optional wake is downgraded to the same notify.
+
+Liveness comes from per-session heartbeat files under
+`~/.pi-schedule/presence/` (fresh within 3 ticks **and** pid-alive), refreshed
+every tick and removed on shutdown. `run_now` is an explicit act in the
+current session and always delivers a full turn there, ignoring the ladder.
+Jobs created before this feature (no `originSessionId`) are treated as
+origin-absent, so they immediately stop hijacking arbitrary sessions.
+On a pi build that does not expose a session id, delivery degrades to the
+previous single-flight behavior.
+
 Fired jobs use an isolated prompt contract:
 
 ```text
@@ -200,6 +228,7 @@ jobId: …
   runs.jsonl
   trusted.json
   locks/
+  presence/          # per-session heartbeats (origin-first delivery)
 
 <project>/.pi/schedule.json
 ```

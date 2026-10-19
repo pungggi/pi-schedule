@@ -128,6 +128,12 @@ export interface ScheduledJob {
    * Undefined for global jobs.
    */
   projectPath?: string;
+  /**
+   * Session id that created the job. When that session is alive at fire time
+   * it receives the full agent turn; otherwise delivery falls back to an
+   * elected owner (notify). Undefined for legacy rows / non-session creators.
+   */
+  originSessionId?: string;
   enabled: boolean;
   /** Overdue handling. Default catch_up_one. */
   missedWindow: MissedWindowPolicy;
@@ -171,6 +177,8 @@ export interface CreateJobInput {
   schedule: ScheduleSpec;
   scope: ScheduleScope;
   projectPath?: string;
+  /** Session that created the job (origin-first delivery). */
+  originSessionId?: string;
   missedWindow?: MissedWindowPolicy;
   tier?: PrivilegeTier;
   maxRuns?: number;
