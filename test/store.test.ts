@@ -39,6 +39,31 @@ describe("ScheduleStore", () => {
     expect(store.listForCwd(project).map((j) => j.id)).toEqual([job.id]);
   });
 
+  it("creates an anchored interval with the next tick as first nextRunAt", () => {
+    const { store } = tempStore();
+    const job = store.create({
+      name: "aligned",
+      prompt: "tick",
+      schedule: parseSchedule("every 2h at 09:00"),
+      scope: "global",
+      now: new Date(2025, 0, 1, 10, 37, 0, 0), // 10:37 local
+    });
+    const next = new Date(job.nextRunAt);
+    expect(next.getHours()).toBe(11); // next anchored tick, not 12:37
+    expect(next.getMinutes()).toBe(0);
+
+    // And the anchored schedule round-trips through the store file.
+    const reloaded = store
+      .listForCwd(process.cwd())
+      .find((j) => j.id === job.id);
+    expect(reloaded?.schedule).toEqual({
+      type: "interval",
+      everyMs: 2 * 3_600_000,
+      every: "2h",
+      anchor: { hour: 9, minute: 0, at: "09:00" },
+    });
+  });
+
   it("persists shell action fields and lastShell via markAttempt", () => {
     const { store, project } = tempStore();
     const job = store.create({

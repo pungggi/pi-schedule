@@ -65,7 +65,7 @@ schedule
   timeoutMs?:     shell only — default 60000, max 600000
   once?:          one-shot relative delay ("10m" / "30s"), then terminate (xor every/dailyAt)
   maxRuns?:       max deliveries (ok+error) before auto-disable
-  every?:         "30m" | "2h" | "1d"   (xor dailyAt/once)
+  every?:         "30m" | "2h" | "1d" | "2h at 09:00"  (xor dailyAt/once)
   dailyAt?:       "09:00"               (xor every/once)
   scope?:         "global" | "project"  (default: project if .pi exists)
   missedWindow?:  "catch_up_one" | "skip"   (default catch_up_one)
@@ -93,6 +93,22 @@ Shell jobs always store `tier=mutate` (command runs outside the agent tool path)
 - **`maxRuns`** — cap a recurring job to N deliveries (counts ok + error; skips/locks don't count). After the cap, the job auto-disables with `terminated: maxRuns`. Re-enabling clears the flag and resumes counting.
 
 A terminated job is disabled and excluded from due scans. `list` shows `[off/terminated:once]` or `[…:maxRuns]`.
+
+### Anchored intervals (`every … at HH:MM`)
+
+Plain `every` intervals count from creation: a job made at 10:37 with `every="2h"` fires 12:37, 14:37, … — the phase is whatever the clock said when you created it.
+
+Anchoring fixes the phase to a wall-clock time you choose:
+
+- **`every="2h at 09:00"`** fires 09:00, 11:00, 13:00, … regardless of when the job was created.
+- **First run**: the *next* anchored tick, even if that is less than one full interval away (created 08:50 → first fire 09:00).
+- **Why**: polls and reviews that should land on round hours (or any fixed grid) no longer drift by an accidental creation-time offset.
+
+Notes:
+
+- `from` is accepted as a synonym: `every="5m from 09:07"` ticks 09:07, 09:12, …
+- Anchored ticks step in fixed milliseconds, like all intervals. On DST days the wall-clock phase can shift by an hour; use `dailyAt` when you need DST-exact daily times.
+- `every="1d at 09:00"` is valid but is just a fixed-step daily; `dailyAt="09:00"` is the better tool for that.
 
 ### Privilege enforcement (strict read_only)
 
@@ -133,6 +149,10 @@ always visible — verify a `run_now` end-to-end by watching the row flip
 schedule action=create name="security-review"
   prompt="Review the code under src/ for security issues (injection, auth bypass, exposed secrets). Summarize findings with file:line. If none, say 'No findings'."
   dailyAt="09:00" scope="project" tier="read_only"
+
+# Hourly review on the hour — anchored, not drifting from creation time.
+schedule action=create name="hourly-heartbeat" kind="notify"
+  prompt="Hour checkpoint." every="1h at 00:00"
 
 # Direct shell poll — no agent turn on green; wake only on failure.
 schedule action=create name="ci-poll" kind="shell"

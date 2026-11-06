@@ -3,6 +3,7 @@
  *
  * Supported forms:
  *   every 30m | every 2h | every 1d | 30m | 2h | 1d
+ *   every 2h at 09:00 | 2h from 09:00   (anchored interval)
  *   daily at 09:00 | daily 09:00 | at 09:00
  *   in 10m | once 10m | in 30s   (one-shot, then terminate)
  */
@@ -13,7 +14,6 @@ import type {
   OnceSchedule,
   ScheduleSpec,
 } from "./types.js";
-
 const MS = {
   m: 60_000,
   h: 3_600_000,
@@ -56,7 +56,7 @@ export function parseSchedule(input: string): ScheduleSpec {
   if (interval) return interval;
 
   throw new ScheduleParseError(
-    `Unrecognized schedule "${input}". Use e.g. "every 30m", "every 2h", "every 1d", "daily at 09:00", or "in 10m".`,
+    `Unrecognized schedule "${input}". Use e.g. "every 30m", "every 2h", "every 2h at 09:00", "daily at 09:00", or "in 10m".`,
   );
 }
 
@@ -109,8 +109,10 @@ function tryParseDaily(raw: string): DailySchedule | null {
 }
 
 function tryParseInterval(raw: string): IntervalSchedule | null {
-  // every 30m | 30m | every 2 h | 1d
-  const m = raw.match(/^(?:every\s+)?(\d+)\s*([mhd])$/);
+  // every 30m | 30m | every 2 h | 1d | every 2h at 09:00 | 30m from 9:00
+  const m = raw.match(
+    /^(?:every\s+)?(\d+)\s*([mhd])(?:\s+(?:at|from)\s+(\d{1,2}):(\d{2}))?$/,
+  );
   if (!m) return null;
 
   const n = Number(m[1]);
@@ -128,7 +130,24 @@ function tryParseInterval(raw: string): IntervalSchedule | null {
     throw new ScheduleParseError("Maximum interval is 90d");
   }
 
-  return { type: "interval", everyMs, every: `${n}${unit}` };
+  let anchor: IntervalSchedule["anchor"];
+  if (m[3] !== undefined) {
+    const hour = Number(m[3]);
+    const minute = Number(m[4]);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+      throw new ScheduleParseError(`Invalid anchor hour in "${raw}" (expected 0-23)`);
+    }
+    if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
+      throw new ScheduleParseError(`Invalid anchor minute in "${raw}" (expected 0-59)`);
+    }
+    anchor = {
+      hour,
+      minute,
+      at: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+    };
+  }
+
+  return { type: "interval", everyMs, every: `${n}${unit}`, ...(anchor ? { anchor } : {}) };
 }
 
 function tryParseOnce(raw: string): OnceSchedule | null {
@@ -155,6 +174,9 @@ function tryParseOnce(raw: string): OnceSchedule | null {
  * `inclusive` is true — used for first scheduling of a brand-new job).
  *
  * Interval: from + everyMs (or now if never run and inclusive).
+ *   With an anchor (e.g. every 2h at 09:00): the next tick of
+ *   anchor + k*everyMs strictly after `from` — phase-aligned to the wall
+ *   clock, independent of when the job was created.
  * Daily: next local occurrence of hour:minute at or after `from`.
  */
 export function computeNextRunAt(
@@ -165,6 +187,9 @@ export function computeNextRunAt(
   const inclusive = options.inclusive ?? false;
 
   if (schedule.type === "interval") {
+    if (schedule.anchor) {
+      return nextAnchoredTick(schedule, from, inclusive);
+    }
     if (inclusive) return new Date(from.getTime());
     return new Date(from.getTime() + schedule.everyMs);
   }
@@ -197,6 +222,28 @@ function nextDailyOccurrence(
 }
 
 /**
+ * Next anchored interval tick: anchor-at-HH:MM on `from`'s calendar day is
+ * the base; ticks are base + k*everyMs (k may be negative for early `from`).
+ * Guarantees next > from (or >= from when inclusive) and next - from <= everyMs.
+ * DST note: ticks step in fixed ms from a same-day base, so on DST days the
+ * wall-clock phase can shift by 1h — consistent with plain interval stepping.
+ */
+function nextAnchoredTick(
+  schedule: IntervalSchedule,
+  from: Date,
+  inclusive: boolean,
+): Date {
+  const anchor = schedule.anchor!;
+  const baseMs = localWallClock(from, anchor.hour, anchor.minute).getTime();
+  const fromMs = from.getTime();
+  const k = Math.floor((fromMs - baseMs) / schedule.everyMs);
+  const atTick = baseMs + k * schedule.everyMs === fromMs;
+
+  if (inclusive && atTick) return new Date(fromMs);
+  return new Date(baseMs + (k + 1) * schedule.everyMs);
+}
+
+/**
  * Build a local Date for hour:minute on the calendar day of `base`.
  * Spring-forward gap (e.g. 02:30 on a DST start day): setHours may land on a
  * different hour — advance day-by-day until wall-clock matches.
@@ -224,7 +271,11 @@ export function isDue(nextRunAt: string, now: Date = new Date()): boolean {
 
 /** Human-readable schedule summary. */
 export function formatSchedule(schedule: ScheduleSpec): string {
-  if (schedule.type === "interval") return `every ${schedule.every}`;
+  if (schedule.type === "interval") {
+    return schedule.anchor
+      ? `every ${schedule.every} at ${schedule.anchor.at}`
+      : `every ${schedule.every}`;
+  }
   if (schedule.type === "once") return `once in ${schedule.delay}`;
   return `daily at ${schedule.at}`;
 }
