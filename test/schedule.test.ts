@@ -269,3 +269,133 @@ describe("computeNextRunAt — DST (America/New_York)", () => {
     expect(next.getMinutes()).toBe(30);
   });
 });
+
+describe("anchored intervals (every N at HH:MM)", () => {
+  it("parses anchored forms (at / from, 1-2 digit hour)", () => {
+    expect(parseSchedule("every 2h at 09:00")).toEqual({
+      type: "interval",
+      everyMs: 2 * 3_600_000,
+      every: "2h",
+      anchor: { hour: 9, minute: 0, at: "09:00" },
+    });
+    expect(parseSchedule("30m from 9:05")).toEqual({
+      type: "interval",
+      everyMs: 30 * 60_000,
+      every: "30m",
+      anchor: { hour: 9, minute: 5, at: "09:05" },
+    });
+    expect(parseSchedule("every 1h at 00:00")).toEqual({
+      type: "interval",
+      everyMs: 3_600_000,
+      every: "1h",
+      anchor: { hour: 0, minute: 0, at: "00:00" },
+    });
+    // Plain intervals stay anchor-free.
+    expect(parseSchedule("every 2h")).toEqual({
+      type: "interval",
+      everyMs: 2 * 3_600_000,
+      every: "2h",
+    });
+  });
+
+  it("rejects invalid anchors", () => {
+    expect(() => parseSchedule("every 2h at 24:00")).toThrow(ScheduleParseError);
+    expect(() => parseSchedule("every 2h at 09:60")).toThrow(ScheduleParseError);
+    expect(() => parseSchedule("every 2h at 9")).toThrow(ScheduleParseError);
+  });
+
+  it("scheduleFromParts passes the anchored every string through", () => {
+    expect(scheduleFromParts({ every: "2h at 09:00" })).toEqual(
+      parseSchedule("every 2h at 09:00"),
+    );
+  });
+
+  it("aligns the first run to the next tick, not creation + N", () => {
+    const from = new Date(2025, 0, 1, 10, 37, 0, 0); // 10:37 local
+    const next = computeNextRunAt(parseSchedule("every 2h at 09:00"), from);
+    expect(next.getHours()).toBe(11); // not 12:37
+    expect(next.getMinutes()).toBe(0);
+  });
+
+  it("before the anchor on the same day: first tick is the anchor itself", () => {
+    const from = new Date(2025, 0, 1, 7, 0, 0, 0); // 07:00 local
+    const next = computeNextRunAt(parseSchedule("every 2h at 09:00"), from);
+    expect(next.getHours()).toBe(9);
+    expect(next.getMinutes()).toBe(0);
+    expect(next.getDate()).toBe(1);
+  });
+
+  it("exclusive advance from an exact tick lands on the following tick", () => {
+    const at = new Date(2025, 0, 1, 11, 0, 0, 0); // exactly on 11:00 tick
+    const exclusive = computeNextRunAt(parseSchedule("every 2h at 09:00"), at);
+    expect(exclusive.getHours()).toBe(13);
+    // Inclusive (first scheduling of a new job exactly on a tick) keeps the tick.
+    const inclusive = computeNextRunAt(parseSchedule("every 2h at 09:00"), at, {
+      inclusive: true,
+    });
+    expect(inclusive.getTime()).toBe(at.getTime());
+  });
+
+  it("continues the arithmetic sequence across midnight", () => {
+    const schedule = parseSchedule("every 2h at 09:00");
+    const at = new Date(2025, 0, 1, 23, 0, 0, 0); // fired the 23:00 tick
+    const next = computeNextRunAt(schedule, at);
+    expect(next.getDate()).toBe(2);
+    expect(next.getHours()).toBe(1);
+    expect(next.getMinutes()).toBe(0);
+  });
+
+  it("keeps phase for intervals that do not divide 24h (5h)", () => {
+    const schedule = parseSchedule("every 5h at 09:00");
+    // 09:00 → 14:00 → 19:00 → 00:00 (next day) → 04:00 → 09:00
+    const at19 = new Date(2025, 0, 1, 19, 0, 0, 0);
+    const midnight = computeNextRunAt(schedule, at19);
+    expect(midnight.getDate()).toBe(2);
+    expect(midnight.getHours()).toBe(0);
+    const atMidnight = new Date(2025, 0, 2, 0, 0, 0, 0);
+    const four = computeNextRunAt(schedule, atMidnight);
+    expect(four.getHours()).toBe(4);
+    const atFour = new Date(2025, 0, 2, 4, 0, 0, 0);
+    const nine = computeNextRunAt(schedule, atFour);
+    expect(nine.getHours()).toBe(9);
+  });
+
+  it("never schedules further than one interval ahead", () => {
+    const schedule = parseSchedule("every 2h at 09:00");
+    for (let m = 0; m <= 24 * 60; m += 7) {
+      const from = new Date(2025, 0, 1, 0, m, 0, 0);
+      const next = computeNextRunAt(schedule, from);
+      expect(next.getTime()).toBeGreaterThan(from.getTime());
+      expect(next.getTime() - from.getTime()).toBeLessThanOrEqual(
+        2 * 3_600_000,
+      );
+    }
+  });
+
+  it("formats anchored intervals", () => {
+    expect(formatSchedule(parseSchedule("every 2h at 09:00"))).toBe(
+      "every 2h at 09:00",
+    );
+    expect(formatSchedule(parseSchedule("every 2h"))).toBe("every 2h");
+  });
+});
+
+describe("anchored intervals across DST (local tz)", () => {
+  it("keeps the next > at and gap <= everyMs invariants on DST boundary days", () => {
+    // Europe/Zurich: 2025-03-30 and 2025-10-26 are the shift days.
+    // Run in any tz: the invariants must hold regardless of whether the day
+    // is 23h, 24h, or 25h long.
+    const schedule = parseSchedule("every 3h at 07:15");
+    for (const day of [new Date(2025, 2, 30), new Date(2025, 9, 26)]) {
+      let at = new Date(day);
+      at.setHours(0, 0, 0, 0);
+      const end = at.getTime() + 2 * 86_400_000;
+      while (at.getTime() < end) {
+        const next = computeNextRunAt(schedule, at);
+        expect(next.getTime()).toBeGreaterThan(at.getTime());
+        expect(next.getTime() - at.getTime()).toBeLessThanOrEqual(3 * 3_600_000);
+        at = next;
+      }
+    }
+  });
+});

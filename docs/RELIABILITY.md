@@ -283,7 +283,7 @@ the extension runtime instead of the task reaching the agent.
 | Choice | Behavior |
 |--------|----------|
 | Daily schedule timezone | **Local** wall clock (`setHours`); DST shift days can be off by ~1h (daily grace covers skip within 1h) |
-| Interval anchoring | Reschedule from **now** after fire → load-anchored, not fixed wall-clock phase; drift accumulates |
+| Interval anchoring | Plain `every` reschedules from **now** after fire → load-anchored, drift accumulates. Optional wall-clock anchor (`every="2h at 09:00"`) pins the phase: ticks at anchor + k·every; DST days can still shift phase ~1h (fixed-ms steps) |
 | `runs.jsonl` growth | Append-only, **no rotation** in MVP. Operators may truncate the **head** (keep the tail — `wasDelivered` only scans the last 200 lines, so a head-truncate is safe and preserves recent idempotency) |
 | Idempotency scan window | Last **200** JSONL lines only; heavy backlog can age out a `delivered` record |
 | Project root / scope | `.pi/schedule.json` under **`ctx.cwd` only** — no upward walk. Launch pi from project root. Note: `.pi/` is gitignored, so **project-scoped jobs are machine-local**, not team-shared via git (treat "project" as "namespaced to this directory on this machine") |

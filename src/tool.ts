@@ -95,7 +95,10 @@ const ScheduleParams = Type.Object({
     }),
   ),
   every: Type.Optional(
-    Type.String({ description: 'Interval, e.g. "30m", "2h", "1d" (create)' }),
+    Type.String({
+      description:
+        'Interval, e.g. "30m", "2h", "1d" — optionally anchored to a wall-clock phase: "2h at 09:00" ticks 09:00, 11:00, 13:00… (create)',
+    }),
   ),
   dailyAt: Type.Optional(
     Type.String({ description: 'Daily local time "HH:MM" (create)' }),
@@ -179,7 +182,7 @@ export function registerScheduleTool(
       "Manage scheduled agent tasks and actions (reviews, polls, shell checks, reminders). " +
       "Actions: create, list, cancel, enable, disable, run_now, history, trust. " +
       "Create kind: prompt (default) | shell | notify | message. " +
-      'Schedules: every "30m"/"2h"/"1d" or dailyAt "09:00". ' +
+      'Schedules: every "30m"/"2h"/"1d" (or "2h at 09:00" to anchor ticks to a wall-clock time instead of counting from creation) or dailyAt "09:00". ' +
       "Defaults: tier=read_only (shell→mutate), missedWindow=catch_up_one. " +
       "Due jobs fire on session start (unless pi was launched with an initial prompt) " +
       "and while the session is open. Project-scope jobs only auto-fire in trusted " +

@@ -65,7 +65,7 @@ schedule
   timeoutMs     (shell) default 60000, max 600000
   once          (create) one-shot delay ("10m"/"30s"), then terminate (xor every/dailyAt)
   maxRuns       (create) cap deliveries (ok+error) before auto-disable
-  every         (create) "30m" | "2h" | "1d"   (xor with dailyAt/once)
+  every         (create) "30m" | "2h" | "1d" | "2h at 09:00" (anchored; xor with dailyAt/once)
   dailyAt       (create) "09:00" local time   (xor with every/once)
   scope         global | project              (default: project if .pi/ exists in cwd)
   tier          read_only | suggest | mutate  (default read_only; shell forces mutate)
@@ -113,10 +113,18 @@ A job that reaches its end state is **terminated** (`once` → one fire; `maxRun
 | Want | Use | Examples |
 |---|---|---|
 | Relative cadence / heartbeat | `every` | polls, health checks, heartbeats: `30m`, `2h`, `1d` |
+| Fixed grid on the clock (round hours, :30, …) | `every` + anchor | `every="2h at 09:00"` → 09:00, 11:00, 13:00… |
 | A specific wall-clock time | `dailyAt` | morning reviews, end-of-day reports: `09:00`, `17:30` |
 
-Rule of thumb: **polls → `every`; reports/reviews → `dailyAt`.** `dailyAt` is
-local timezone and DST-safe.
+Rule of thumb: **polls → `every`; clock-aligned intervals → `every … at HH:MM`;
+reports/reviews → `dailyAt`.** `dailyAt` is local timezone and DST-safe.
+
+**Anchored intervals:** plain `every` counts from creation (a job made at
+10:37 with `every="2h"` fires 12:37, 14:37…). Append `at HH:MM` (or
+`from HH:MM`) to pin the phase to a wall clock you choose; the first run is
+the next anchored tick, even if less than one interval away. Ticks step in
+fixed milliseconds like all intervals — on DST days the phase can shift an
+hour, so use `dailyAt` for DST-exact daily times.
 
 ### `scope`
 

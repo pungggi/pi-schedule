@@ -9,6 +9,16 @@
 
 export type ScheduleScope = "global" | "project";
 
+/** Wall-clock anchor for interval schedules (local timezone). */
+export interface IntervalAnchor {
+  /** Hour 0-23 local. */
+  hour: number;
+  /** Minute 0-59 local. */
+  minute: number;
+  /** Original human string, e.g. "09:00". */
+  at: string;
+}
+
 /** Interval schedule: every N minutes / hours / days. */
 export interface IntervalSchedule {
   type: "interval";
@@ -16,6 +26,12 @@ export interface IntervalSchedule {
   everyMs: number;
   /** Original human string, e.g. "30m", "2h", "1d". */
   every: string;
+  /**
+   * Optional wall-clock phase: ticks at HH:MM + k*everyMs (local time)
+   * instead of counting from creation. e.g. every 2h at 09:00 →
+   * 09:00, 11:00, 13:00, …
+   */
+  anchor?: IntervalAnchor;
 }
 
 /** Daily wall-clock schedule (local timezone). */
