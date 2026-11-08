@@ -2,6 +2,12 @@
 
 All notable changes to `pi-schedule`. Versions are tag-driven: pushing `vX.Y.Z` triggers CI to publish with OIDC + provenance (see `docs/PUBLISHING.md`). Date format: YYYY-MM-DD.
 
+## 0.6.1 - 2026-11-08
+
+### Changed
+
+- **CHANGELOG.md now ships in the npm tarball** — `files` previously excluded it, so pi ≥ 1.5.0's "Extension Updates" feature (which reads `CHANGELOG.md` from the installed package after an update) stayed silently off. Why: this package has kept a full changelog since 0.3.0, but none of it was ever installed for users to see. With this release pi records its version baseline; from the next release onward, release notes appear in the pi launcher under "Extension Updates".
+
 ## 0.6.0 - 2026-11-06
 
 ### Added

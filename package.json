@@ -1,6 +1,6 @@
 {
   "name": "pi-schedule",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Scheduled actions for pi agents — prompts, shell checks, notifications, one-shots, and bounded polls",
   "keywords": [
     "pi-package",
@@ -14,6 +14,7 @@
   ],
   "type": "module",
   "files": [
+    "CHANGELOG.md",
     "src",
     "skills",
     "docs",
