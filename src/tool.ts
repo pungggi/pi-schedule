@@ -5,7 +5,6 @@
  * Job kinds (create.kind): prompt | shell | notify | message
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolve } from "node:path";
 import { Type } from "typebox";
@@ -37,6 +36,26 @@ import type {
   ScheduledJob,
   ScheduleScope,
 } from "./types.js";
+
+/**
+ * typebox-native string-enum schema builder.
+ *
+ * pi-ai's StringEnum switched to @earendil-works/pi-schema types in 1.6.0,
+ * which breaks typebox's Static inference inside Type.Object (affected
+ * properties degrade to unknown/{}). registerTool still expects a typebox
+ * TSchema, so we keep the same { type: "string", enum: [...] } wire shape
+ * that pi-ai's version emits (provider-compatible, no anyOf/const).
+ */
+function StringEnum<T extends readonly string[]>(
+  values: T,
+  options?: { description?: string },
+) {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: [...values],
+    ...(options?.description !== undefined ? { description: options.description } : {}),
+  });
+}
 
 const ScheduleParams = Type.Object({
   action: StringEnum([
