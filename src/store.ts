@@ -62,6 +62,8 @@ export interface StorePaths {
   lockDir: string;
   /** Project trust registry (see trust.ts). */
   trustFile: string;
+  /** Live-session heartbeat dir (see presence.ts). */
+  presenceDir: string;
 }
 
 export function defaultPaths(home: string = homedir()): StorePaths {
@@ -73,6 +75,7 @@ export function defaultPaths(home: string = homedir()): StorePaths {
     runsFile: join(globalDir, "runs.jsonl"),
     lockDir: join(globalDir, "locks"),
     trustFile: join(globalDir, "trusted.json"),
+    presenceDir: join(globalDir, "presence"),
   };
 }
 
@@ -102,6 +105,10 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
     typeof raw.projectPath === "string" && raw.projectPath
       ? raw.projectPath
       : undefined;
+  const originSessionId =
+    typeof raw.originSessionId === "string" && raw.originSessionId
+      ? raw.originSessionId
+      : undefined;
   const wakeOn = raw.wakeOn !== undefined && isWakeOn(raw.wakeOn) ? raw.wakeOn : undefined;
   const timeoutMs =
     raw.timeoutMs !== undefined &&
@@ -130,6 +137,7 @@ function normalizeJob(raw: ScheduledJob): ScheduledJob {
     terminated: raw.terminated ?? null,
     missedWindow: raw.missedWindow ?? DEFAULT_MISSED_WINDOW,
     tier: raw.tier ?? DEFAULT_TIER,
+    originSessionId,
   };
 }
 
@@ -438,6 +446,7 @@ export class ScheduleStore {
       schedule: input.schedule,
       scope,
       projectPath: projectRoot,
+      originSessionId: input.originSessionId,
       enabled: true,
       terminated: null,
       missedWindow: input.missedWindow ?? DEFAULT_MISSED_WINDOW,

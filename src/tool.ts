@@ -28,6 +28,7 @@ import {
   scheduleFromParts,
 } from "./schedule.js";
 import type { ScheduleRunner } from "./runner.js";
+import { sessionIdOf } from "./session.js";
 import { StoreError, defaultScope, type ScheduleStore } from "./store.js";
 import { TrustStore } from "./trust.js";
 import type {
@@ -327,6 +328,7 @@ function handleCreate(
     schedule,
     scope,
     projectPath: scope === "project" ? cwd : undefined,
+    originSessionId: sessionIdOf(ctx),
     missedWindow,
     tier,
   });

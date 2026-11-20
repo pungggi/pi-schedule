@@ -43,6 +43,8 @@ interface HarnessOpts {
   hasInitialPrompt?: boolean;
   hasUI?: boolean;
   noSendMessage?: boolean;
+  /** This session's id, exposed via ctx.sessionManager.getSessionId(). */
+  sessionId?: string;
   execResult?: { stdout?: string; stderr?: string; code?: number; killed?: boolean };
   execThrows?: boolean;
   compactionWaitMs?: number;
@@ -129,6 +131,9 @@ function makeHarness(opts: HarnessOpts = {}) {
     hasUI: opts.hasUI ?? true,
     isIdle: () => idle,
     ui: { notify: (m: string) => notifies.push(m) },
+    ...(opts.sessionId
+      ? { sessionManager: { getSessionId: () => opts.sessionId } }
+      : {}),
   } as unknown as ExtensionContext;
 
   const runner = new ScheduleRunner({
@@ -184,8 +189,22 @@ function makeHarness(opts: HarnessOpts = {}) {
     notifies,
     execCalls,
     lockDir: paths.lockDir,
+    presenceDir: paths.presenceDir,
     createGlobal,
     createProject,
+    /** Stamp an origin session id onto an existing job. */
+    setOrigin: (id: string, originSessionId: string) => {
+      const j = store.get(id, project)!;
+      store.upsert({ ...j, originSessionId });
+    },
+    /** Simulate another live session by writing a fresh heartbeat record. */
+    addPresence: (sessionId: string, cwd: string = project) => {
+      mkdirSync(paths.presenceDir, { recursive: true });
+      writeFileSync(
+        join(paths.presenceDir, `${sessionId}.json`),
+        JSON.stringify({ sessionId, pid: process.pid, cwd, lastSeen: Date.now() }),
+      );
+    },
     setClock: (d: Date) => {
       clock = d;
     },
@@ -1250,5 +1269,104 @@ describe("ScheduleRunner — compaction busy-wait", () => {
     expect(h.sent).toHaveLength(1);
     const after = h.store.get(job.id, h.project)!;
     expect(after.lastStatus).toBe("ok");
+  });
+});
+
+describe("ScheduleRunner — origin-first delivery ladder", () => {
+  it("delivers a full turn in the session that created the job", async () => {
+    const h = makeHarness({ sessionId: "A" });
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A");
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(1); // full agent turn
+    expect(h.sent[0]?.content).toContain("[scheduled-task]");
+    expect(h.store.get(job.id, h.project)!.lastStatus).toBe("ok");
+  });
+
+  it("defers (no-op) in a non-origin session while the origin is alive", async () => {
+    const h = makeHarness({ sessionId: "B" });
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A");
+    h.addPresence("A"); // origin session A is alive
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(0); // no turn here
+    expect(h.customMessages).toHaveLength(0); // no notify here either
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBeNull(); // untouched — origin handles it
+    expect(after.runCount).toBe(0);
+    expect(after.nextRunAt).toBe(T0); // still due
+  });
+
+  it("downgrades to a notify (no turn) in the elected owner when origin is gone and several sessions are open", async () => {
+    // self "B" is the lexicographically-smallest live id → the owner.
+    const h = makeHarness({ sessionId: "B" });
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A"); // A is NOT in presence → gone
+    h.addPresence("C"); // another open session
+    h.addPresence("D");
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(0); // NO surprise agent turn
+    expect(h.customMessages).toHaveLength(1); // a notify instead
+    expect(h.customMessages[0]?.content).toContain("run_now");
+    expect(h.customMessages[0]?.triggerTurn).toBe(false);
+    const after = h.store.get(job.id, h.project)!;
+    expect(after.lastStatus).toBe("ok"); // delivered (as notify) + advanced
+    expect(new Date(after.nextRunAt).getTime()).toBeGreaterThan(
+      new Date(T0).getTime(),
+    );
+  });
+
+  it("defers (no-op) in a non-owner session when origin is gone and several are open", async () => {
+    const h = makeHarness({ sessionId: "D" }); // not the smallest → not owner
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A");
+    h.addPresence("B");
+    h.addPresence("C");
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(0);
+    expect(h.customMessages).toHaveLength(0);
+    expect(h.store.get(job.id, h.project)!.lastStatus).toBeNull();
+  });
+
+  it("delivers a full turn in a lone session even when it is not the origin", async () => {
+    const h = makeHarness({ sessionId: "B" });
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A"); // A gone, B is the only live session
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "session_start" });
+
+    expect(h.sent).toHaveLength(1); // full turn — single session is not confusing
+    expect(h.store.get(job.id, h.project)!.lastStatus).toBe("ok");
+  });
+
+  it("run_now always delivers a full turn in the current session, ignoring origin", async () => {
+    const h = makeHarness({ sessionId: "B" });
+    h.trust.trust(h.project);
+    const job = h.createProject("mine");
+    h.setOrigin(job.id, "A");
+    h.addPresence("A"); // origin alive elsewhere
+    h.forceDue(job.id);
+
+    await h.runner.fireDue(h.ctx, { source: "run_now", jobIds: [job.id] });
+
+    expect(h.sent).toHaveLength(1); // explicit user act here → full turn
   });
 });
